@@ -8,6 +8,7 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"github.com/juanfont/headscale/hscontrol/policy/matcher"
 	"github.com/juanfont/headscale/hscontrol/types"
+	"github.com/puzpuzpuz/xsync/v4"
 	"github.com/stretchr/testify/require"
 	"gorm.io/gorm"
 	"tailscale.com/tailcfg"
@@ -106,7 +107,7 @@ func TestInvalidateAutogroupSelfCache(t *testing.T) {
 		require.NoError(t, err)
 	}
 
-	require.Equal(t, len(initialNodes), len(pm.filterRulesMap))
+	require.Equal(t, len(initialNodes), pm.filterRulesMap.Size())
 
 	tests := []struct {
 		name            string
@@ -188,19 +189,19 @@ func TestInvalidateAutogroupSelfCache(t *testing.T) {
 				}
 			}
 
-			pm.filterRulesMap = make(map[types.NodeID][]tailcfg.FilterRule)
+			pm.filterRulesMap.Clear()
 			for _, n := range initialNodes {
 				_, err := pm.FilterForNode(n.View())
 				require.NoError(t, err)
 			}
 
-			initialCacheSize := len(pm.filterRulesMap)
+			initialCacheSize := pm.filterRulesMap.Size()
 			require.Equal(t, len(initialNodes), initialCacheSize)
 
 			pm.invalidateAutogroupSelfCache(initialNodes.ViewSlice(), tt.newNodes.ViewSlice())
 
 			// Verify the expected number of cache entries were cleared
-			finalCacheSize := len(pm.filterRulesMap)
+			finalCacheSize := pm.filterRulesMap.Size()
 			clearedEntries := initialCacheSize - finalCacheSize
 			require.Equal(t, tt.expectedCleared, clearedEntries, tt.description)
 		})
@@ -351,16 +352,20 @@ func TestInvalidateGlobalPolicyCache(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			pm := &PolicyManager{
-				nodes:             tt.oldNodes.ViewSlice(),
-				filterRulesMap:    tt.initialCache,
-				usesAutogroupSelf: false,
+				nodes:                  tt.oldNodes.ViewSlice(),
+				filterRulesMap:         xsync.NewMap[types.NodeID, []tailcfg.FilterRule](),
+				compiledFilterRulesMap: xsync.NewMap[types.NodeID, []tailcfg.FilterRule](),
+				usesAutogroupSelf:      false,
+			}
+			for id, rules := range tt.initialCache {
+				pm.filterRulesMap.Store(id, rules)
 			}
 
 			pm.invalidateGlobalPolicyCache(tt.newNodes.ViewSlice())
 
 			// Verify cache state
 			for nodeID, shouldExist := range tt.expectedCacheAfter {
-				_, exists := pm.filterRulesMap[nodeID]
+				_, exists := pm.filterRulesMap.Load(nodeID)
 				require.Equal(t, shouldExist, exists, "node %d cache existence mismatch", nodeID)
 			}
 		})
