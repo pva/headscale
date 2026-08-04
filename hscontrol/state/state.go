@@ -1169,6 +1169,13 @@ func (s *State) HandleNodeFromAuthPath(
 
 	// If this node exists for this user, update the node in place.
 	if existsSameUser && existingNodeSameUser.Valid() {
+		// Re-auth may rotate the NodeKey. Do not let it claim a key already
+		// bound to another machine and poison the NodeStore index.
+		if existing, ok := s.nodeStore.GetNodeByNodeKey(regEntry.Node.NodeKey); ok &&
+			existing.MachineKey() != regEntry.Node.MachineKey {
+			return types.NodeView{}, change.EmptySet, fmt.Errorf("node key already in use by another machine")
+		}
+
 		log.Debug().
 			Caller().
 			Str("registration_id", registrationID.String()).

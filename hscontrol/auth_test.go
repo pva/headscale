@@ -11,6 +11,7 @@ import (
 
 	"github.com/juanfont/headscale/hscontrol/mapper"
 	"github.com/juanfont/headscale/hscontrol/types"
+	"github.com/juanfont/headscale/hscontrol/util"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"tailscale.com/tailcfg"
@@ -3516,4 +3517,56 @@ func TestNewRegistrationRejectsNodeKeyClaimedByAnotherMachine(t *testing.T) {
 	owner, ok := app.state.GetNodeByNodeKey(sharedNodeKey)
 	require.True(t, ok)
 	assert.Equal(t, victimMachine, owner.MachineKey())
+}
+
+func TestReauthRejectsNodeKeyClaimedByAnotherMachine(t *testing.T) {
+	app := createTestApp(t)
+
+	victim := app.state.CreateUserForTest("reauth-nodekey-victim")
+	attacker := app.state.CreateUserForTest("reauth-nodekey-attacker")
+	victimPAK, err := app.state.CreatePreAuthKey(types.UserID(victim.ID), true, false, nil, nil)
+	require.NoError(t, err)
+	attackerPAK, err := app.state.CreatePreAuthKey(types.UserID(attacker.ID), true, false, nil, nil)
+	require.NoError(t, err)
+
+	victimNodeKey := key.NewNode().Public()
+	victimMachine := key.NewMachine().Public()
+	_, err = app.handleRegisterWithAuthKey(tailcfg.RegisterRequest{
+		Auth:     &tailcfg.RegisterResponseAuth{AuthKey: victimPAK.Key},
+		NodeKey:  victimNodeKey,
+		Hostinfo: &tailcfg.Hostinfo{Hostname: "reauth-nodekey-victim"},
+	}, victimMachine)
+	require.NoError(t, err)
+
+	attackerMachine := key.NewMachine().Public()
+	attackerNodeKey := key.NewNode().Public()
+	_, err = app.handleRegisterWithAuthKey(tailcfg.RegisterRequest{
+		Auth:     &tailcfg.RegisterResponseAuth{AuthKey: attackerPAK.Key},
+		NodeKey:  attackerNodeKey,
+		Hostinfo: &tailcfg.Hostinfo{Hostname: "reauth-nodekey-attacker"},
+	}, attackerMachine)
+	require.NoError(t, err)
+
+	regID, err := types.NewRegistrationID()
+	require.NoError(t, err)
+	app.state.SetRegistrationCacheEntry(regID, types.NewRegisterNode(types.Node{
+		MachineKey: attackerMachine,
+		NodeKey:    victimNodeKey,
+		Hostname:   "reauth-nodekey-attacker",
+		Hostinfo:   &tailcfg.Hostinfo{Hostname: "reauth-nodekey-attacker"},
+	}))
+
+	_, _, err = app.state.HandleNodeFromAuthPath(
+		regID,
+		types.UserID(attacker.ID),
+		nil,
+		util.RegisterMethodOIDC,
+	)
+	require.Error(t, err)
+
+	owner, ok := app.state.GetNodeByNodeKey(victimNodeKey)
+	require.True(t, ok)
+	assert.Equal(t, victimMachine, owner.MachineKey())
+	_, ok = app.state.GetNodeByNodeKey(attackerNodeKey)
+	assert.True(t, ok, "attacker's original NodeKey must remain indexed")
 }
