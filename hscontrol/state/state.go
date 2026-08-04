@@ -68,6 +68,8 @@ type State struct {
 	registrationCache *expirable.LRU[types.RegistrationID, types.RegisterNode]
 	// primaryRoutes tracks primary route assignments for nodes
 	primaryRoutes *routes.PrimaryRoutes
+	// connectGen rejects stale disconnects from superseded poll sessions.
+	connectGen sync.Map // types.NodeID -> *atomic.Uint64
 }
 
 // NewState creates and initializes a new State instance, setting up the database,
@@ -448,7 +450,10 @@ func (s *State) DeleteNode(node types.NodeView) (change.ChangeSet, error) {
 }
 
 // Connect marks a node as connected and updates its primary routes in the state.
-func (s *State) Connect(id types.NodeID) []change.ChangeSet {
+// The returned generation must be passed to Disconnect.
+func (s *State) Connect(id types.NodeID) ([]change.ChangeSet, uint64) {
+	gen := s.nextConnectGen(id)
+
 	// CRITICAL FIX: Update the online status in NodeStore BEFORE creating change notification
 	// This ensures that when the NodeCameOnline change is distributed and processed by other nodes,
 	// the NodeStore already reflects the correct online status for full map generation.
@@ -458,7 +463,7 @@ func (s *State) Connect(id types.NodeID) []change.ChangeSet {
 		// n.LastSeen = ptr.To(now)
 	})
 	if !ok {
-		return nil
+		return nil, gen
 	}
 	c := []change.ChangeSet{change.NodeOnline(id)}
 
@@ -473,11 +478,45 @@ func (s *State) Connect(id types.NodeID) []change.ChangeSet {
 		c = append(c, change.NodeAdded(id))
 	}
 
-	return c
+	return c, gen
+}
+
+func (s *State) nextConnectGen(id types.NodeID) uint64 {
+	value, _ := s.connectGen.LoadOrStore(id, &atomic.Uint64{})
+	counter, ok := value.(*atomic.Uint64)
+	if !ok {
+		return 0
+	}
+
+	return counter.Add(1)
+}
+
+func (s *State) connectGeneration(id types.NodeID) uint64 {
+	value, ok := s.connectGen.Load(id)
+	if !ok {
+		return 0
+	}
+
+	counter, ok := value.(*atomic.Uint64)
+	if !ok {
+		return 0
+	}
+
+	return counter.Load()
 }
 
 // Disconnect marks a node as disconnected and updates its primary routes in the state.
-func (s *State) Disconnect(id types.NodeID) ([]change.ChangeSet, error) {
+func (s *State) Disconnect(id types.NodeID, gen uint64) ([]change.ChangeSet, error) {
+	if current := s.connectGeneration(id); current != gen {
+		log.Debug().
+			Uint64("node.id", id.Uint64()).
+			Uint64("disconnect_gen", gen).
+			Uint64("current_gen", current).
+			Msg("Stale disconnect rejected because a newer session is active")
+
+		return nil, nil
+	}
+
 	now := time.Now()
 
 	node, ok := s.nodeStore.UpdateNode(id, func(n *types.Node) {

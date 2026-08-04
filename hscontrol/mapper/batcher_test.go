@@ -32,6 +32,8 @@ type batcherTestCase struct {
 type testBatcherWrapper struct {
 	Batcher
 	state *state.State
+
+	connectGens sync.Map // connection channel -> uint64
 }
 
 func (t *testBatcherWrapper) AddNode(
@@ -44,7 +46,8 @@ func (t *testBatcherWrapper) AddNode(
 	// This ensures the NodeStore has correct online status for change processing
 	if t.state != nil {
 		// Use Connect to properly mark node online in NodeStore but don't send its changes
-		_ = t.state.Connect(id)
+		_, gen := t.state.Connect(id)
+		t.connectGens.Store(c, gen)
 	}
 
 	// First add the node to the real batcher
@@ -65,7 +68,11 @@ func (t *testBatcherWrapper) RemoveNode(id types.NodeID, c chan<- *tailcfg.MapRe
 	// This ensures the NodeStore has correct offline status when the change is processed
 	if t.state != nil {
 		// Use Disconnect to properly mark node offline in NodeStore but don't send its changes
-		_, _ = t.state.Disconnect(id)
+		var gen uint64
+		if value, ok := t.connectGens.LoadAndDelete(c); ok {
+			gen, _ = value.(uint64)
+		}
+		_, _ = t.state.Disconnect(id, gen)
 	}
 
 	// Send the offline notification that poll.go would normally send

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/juanfont/headscale/hscontrol/types"
+	"github.com/juanfont/headscale/hscontrol/types/change"
 	"github.com/juanfont/headscale/hscontrol/util"
 	"github.com/rs/zerolog/log"
 	"tailscale.com/tailcfg"
@@ -149,11 +150,16 @@ func (m *mapSession) serveLongPoll() {
 
 	log.Trace().Caller().Uint64("node.id", m.node.ID.Uint64()).Str("node.name", m.node.Hostname).Msg("Long poll session started because client connected")
 
+	var connectGen uint64
+
 	// Clean up the session when the client disconnects
 	defer func() {
 		m.stopFromBatcher()
 
-		_ = m.h.mapBatcher.RemoveNode(m.node.ID, m.ch)
+		stillConnected := m.h.mapBatcher.RemoveNode(m.node.ID, m.ch)
+		if stillConnected {
+			return
+		}
 
 		// When a node disconnects, it might rapidly reconnect (e.g. mobile clients, network weather).
 		// Instead of immediately marking the node as offline, we wait a few seconds to see if it reconnects.
@@ -176,7 +182,7 @@ func (m *mapSession) serveLongPoll() {
 		}
 
 		if disconnected {
-			disconnectChanges, err := m.h.state.Disconnect(m.node.ID)
+			disconnectChanges, err := m.h.state.Disconnect(m.node.ID, connectGen)
 			if err != nil {
 				m.errf(err, "Failed to disconnect node %s", m.node.Hostname)
 			}
@@ -215,7 +221,8 @@ func (m *mapSession) serveLongPoll() {
 	// 2. Connect: marks the node online and recalculates primary routes based on the updated state
 	// While this results in two notifications, it ensures route data is synchronized before
 	// primary route selection occurs, which is critical for proper HA subnet router failover.
-	connectChanges := m.h.state.Connect(m.node.ID)
+	var connectChanges []change.ChangeSet
+	connectChanges, connectGen = m.h.state.Connect(m.node.ID)
 
 	m.infof("node has connected, mapSession: %p, chan: %p", m, m.ch)
 
