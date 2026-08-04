@@ -180,6 +180,18 @@ func TestOIDCClaimsIdentifier(t *testing.T) {
 			sub:      "resource",
 			expected: "ftp://example.com/directory/resource",
 		},
+		{
+			name:     "path traversal subject is preserved",
+			iss:      "https://oidc.example.com/tenant",
+			sub:      "..",
+			expected: "https://oidc.example.com/tenant/..",
+		},
+		{
+			name:     "dot subject is preserved",
+			iss:      "https://oidc.example.com/tenant",
+			sub:      ".",
+			expected: "https://oidc.example.com/tenant/.",
+		},
 	}
 
 	for _, tt := range tests {
