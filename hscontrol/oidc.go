@@ -597,6 +597,7 @@ func setCSRFCookie(w http.ResponseWriter, r *http.Request, name string) (string,
 		MaxAge:   int(time.Hour.Seconds()),
 		Secure:   r.TLS != nil,
 		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
 	}
 	http.SetCookie(w, c)
 
