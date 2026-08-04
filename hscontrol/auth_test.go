@@ -460,9 +460,8 @@ func TestAuthenticationFlows(t *testing.T) {
 			},
 			request: func(_ string) tailcfg.RegisterRequest {
 				return tailcfg.RegisterRequest{
-					Auth:    nil,
+					Auth:    nil, // tailscaled-restart fast path
 					NodeKey: nodeKey1.Public(),
-					Expiry:  time.Now().Add(-1 * time.Hour),
 				}
 			},
 			machineKey: func() key.MachinePublic { return machineKey2.Public() }, // Different machine key
