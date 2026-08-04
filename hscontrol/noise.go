@@ -32,6 +32,12 @@ const (
 
 	// EarlyNoise was added in protocol version 49.
 	earlyNoiseCapabilityVersion = 49
+
+	// noiseBodyLimit is the maximum allowed request body size for Noise protocol
+	// handlers. This prevents unauthenticated OOM attacks via unbounded body reads.
+	// No legitimate Noise request (MapRequest, RegisterRequest, etc.) comes close
+	// to this limit; typical payloads are a few KB.
+	noiseBodyLimit int64 = 1048576 // 1 MiB
 )
 
 type noiseServer struct {
@@ -95,6 +101,15 @@ func (h *Headscale) NoiseUpgradeHandler(
 	// The HTTP2 server that exposes this router is created for
 	// a single hijacked connection from /ts2021, using netutil.NewOneConnListener
 	router := mux.NewRouter()
+
+	// The Noise handshake accepts any machine key without checking registration,
+	// so every endpoint behind this router must bound its request body.
+	router.Use(func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			r.Body = http.MaxBytesReader(w, r.Body, noiseBodyLimit)
+			next.ServeHTTP(w, r)
+		})
+	})
 	router.Use(prometheusMiddleware)
 
 	router.HandleFunc("/machine/register", noiseServer.NoiseRegistrationHandler).
@@ -199,10 +214,8 @@ func (ns *noiseServer) NoisePollNetMapHandler(
 	writer http.ResponseWriter,
 	req *http.Request,
 ) {
-	body, _ := io.ReadAll(req.Body)
-
 	var mapRequest tailcfg.MapRequest
-	if err := json.Unmarshal(body, &mapRequest); err != nil {
+	if err := json.NewDecoder(req.Body).Decode(&mapRequest); err != nil {
 		httpError(writer, err)
 		return
 	}
@@ -245,19 +258,14 @@ func (ns *noiseServer) NoiseRegistrationHandler(
 	}
 
 	registerRequest, registerResponse := func() (*tailcfg.RegisterRequest, *tailcfg.RegisterResponse) {
-		var resp *tailcfg.RegisterResponse
-		body, err := io.ReadAll(req.Body)
-		if err != nil {
-			return &tailcfg.RegisterRequest{}, regErr(err)
-		}
 		var regReq tailcfg.RegisterRequest
-		if err := json.Unmarshal(body, &regReq); err != nil {
+		if err := json.NewDecoder(req.Body).Decode(&regReq); err != nil {
 			return &regReq, regErr(err)
 		}
 
 		ns.nodeKey = regReq.NodeKey
 
-		resp, err = ns.headscale.handleRegister(req.Context(), regReq, ns.conn.Peer())
+		resp, err := ns.headscale.handleRegister(req.Context(), regReq, ns.conn.Peer())
 		if err != nil {
 			var httpErr HTTPError
 			if errors.As(err, &httpErr) {
