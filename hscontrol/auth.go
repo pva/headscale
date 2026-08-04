@@ -281,6 +281,14 @@ func (h *Headscale) waitForFollowup(
 				// registration is expired in the cache, instruct the client to try a new registration
 				return h.reqToNewRegisterResponse(req, machineKey)
 			}
+			if node.MachineKey != machineKey {
+				return nil, NewHTTPError(
+					http.StatusUnauthorized,
+					"node exists with a different machine key",
+					nil,
+				)
+			}
+
 			return nodeToRegisterResponse(node.View()), nil
 		}
 	}

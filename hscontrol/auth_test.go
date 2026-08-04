@@ -3,6 +3,7 @@ package hscontrol
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"net/url"
 	"strings"
 	"testing"
@@ -663,6 +664,7 @@ func TestAuthenticationFlows(t *testing.T) {
 					time.Sleep(20 * time.Millisecond)
 					user := app.state.CreateUserForTest("followup-user")
 					node := app.state.CreateNodeForTest(user, "followup-success-node")
+					node.MachineKey = machineKey1.Public()
 					registered <- node
 				}()
 
@@ -2414,6 +2416,63 @@ func TestAuthenticationFlows(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestWaitForFollowupMachineKeyMismatch(t *testing.T) {
+	app := createTestApp(t)
+
+	victimMachineKey := key.NewMachine()
+	attackerMachineKey := key.NewMachine()
+
+	newPendingFollowup := func(hostname string) string {
+		regID, err := types.NewRegistrationID()
+		require.NoError(t, err)
+
+		regEntry := types.NewRegisterNode(types.Node{
+			MachineKey: victimMachineKey.Public(),
+			Hostname:   hostname,
+		})
+		app.state.SetRegistrationCacheEntry(regID, regEntry)
+
+		user := app.state.CreateUserForTest(hostname + "-user")
+		node := app.state.CreateNodeForTest(user, hostname)
+		node.MachineKey = victimMachineKey.Public()
+
+		go func() {
+			regEntry.Registered <- node
+		}()
+
+		return fmt.Sprintf("http://localhost:8080/register/%s", regID)
+	}
+
+	followup := func(url string, machineKey key.MachinePublic) (*tailcfg.RegisterResponse, error) {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		return app.handleRegister(ctx, tailcfg.RegisterRequest{
+			Followup: url,
+			NodeKey:  key.NewNode().Public(),
+		}, machineKey)
+	}
+
+	t.Run("mismatched_machine_key_is_rejected", func(t *testing.T) {
+		resp, err := followup(newPendingFollowup("followup-mismatch"), attackerMachineKey.Public())
+
+		require.Error(t, err)
+		assert.Nil(t, resp)
+
+		var httpErr HTTPError
+		require.ErrorAs(t, err, &httpErr)
+		assert.Equal(t, http.StatusUnauthorized, httpErr.Code)
+	})
+
+	t.Run("matching_machine_key_still_completes", func(t *testing.T) {
+		resp, err := followup(newPendingFollowup("followup-match"), victimMachineKey.Public())
+
+		require.NoError(t, err)
+		require.NotNil(t, resp)
+		assert.True(t, resp.MachineAuthorized)
+	})
 }
 
 // runInteractiveWorkflowTest executes a multi-step interactive authentication workflow
