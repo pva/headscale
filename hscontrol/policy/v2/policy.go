@@ -316,9 +316,8 @@ func (pm *PolicyManager) BuildPeerMap(nodes views.Slice[types.NodeView]) map[typ
 		nodeMatchers[node.ID()] = matcher.MatchesFromFilterRules(filter)
 	}
 
-	// Check each node pair for peer relationships.
-	// Start j at i+1 to avoid checking the same pair twice and creating duplicates.
-	// We check both directions (i->j and j->i) since ACLs can be asymmetric.
+	// Check each pair once. Peer visibility is symmetric: if either node can
+	// access the other, both must see each other in their netmaps.
 	for i := range nodes.Len() {
 		nodeI := nodes.At(i)
 		matchersI, hasFilterI := nodeMatchers[nodeI.ID()]
@@ -327,13 +326,10 @@ func (pm *PolicyManager) BuildPeerMap(nodes views.Slice[types.NodeView]) map[typ
 			nodeJ := nodes.At(j)
 			matchersJ, hasFilterJ := nodeMatchers[nodeJ.ID()]
 
-			// Check if nodeI can access nodeJ
-			if hasFilterI && nodeI.CanAccess(matchersI, nodeJ) {
+			canIAccessJ := hasFilterI && nodeI.CanAccess(matchersI, nodeJ)
+			canJAccessI := hasFilterJ && nodeJ.CanAccess(matchersJ, nodeI)
+			if canIAccessJ || canJAccessI {
 				ret[nodeI.ID()] = append(ret[nodeI.ID()], nodeJ)
-			}
-
-			// Check if nodeJ can access nodeI
-			if hasFilterJ && nodeJ.CanAccess(matchersJ, nodeI) {
 				ret[nodeJ.ID()] = append(ret[nodeJ.ID()], nodeI)
 			}
 		}

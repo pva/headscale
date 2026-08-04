@@ -441,6 +441,40 @@ func TestAutogroupSelfReducedVsUnreducedRules(t *testing.T) {
 	require.Empty(t, peerMap[node2.ID], "node2 should have no peers")
 }
 
+func TestAutogroupSelfWithAsymmetricAdminRule(t *testing.T) {
+	users := types.Users{
+		{Model: gorm.Model{ID: 1}, Name: "admin", Email: "admin@example.com"},
+		{Model: gorm.Model{ID: 2}, Name: "user", Email: "user@example.com"},
+	}
+
+	admin := node("admin-device", "100.64.0.1", "fd7a:115c:a1e0::1", users[0], &tailcfg.Hostinfo{})
+	admin.ID = 1
+	server := node("tagged-server", "100.64.0.2", "fd7a:115c:a1e0::2", users[1], &tailcfg.Hostinfo{})
+	server.ID = 2
+	server.ForcedTags = []string{"tag:server"}
+	nodes := types.Nodes{admin, server}
+
+	policy := `{
+		"groups": {"group:admin": ["admin@example.com"]},
+		"tagOwners": {"tag:server": ["user@example.com"]},
+		"acls": [
+			{"action": "accept", "src": ["group:admin"], "dst": ["*:*"]},
+			{"action": "accept", "src": ["autogroup:member"], "dst": ["autogroup:self:*"]}
+		]
+	}`
+
+	pm, err := NewPolicyManager([]byte(policy), users, nodes.ViewSlice())
+	require.NoError(t, err)
+	peerMap := pm.BuildPeerMap(nodes.ViewSlice())
+
+	require.True(t, slices.ContainsFunc(peerMap[admin.ID], func(n types.NodeView) bool {
+		return n.ID() == server.ID
+	}), "admin should see tagged server")
+	require.True(t, slices.ContainsFunc(peerMap[server.ID], func(n types.NodeView) bool {
+		return n.ID() == admin.ID
+	}), "tagged server should see admin for return traffic")
+}
+
 // When separate ACL rules exist (one with autogroup:self, one with tag:router),
 // the autogroup:self rule should not prevent the tag:router rule from working.
 // This ensures that autogroup:self doesn't interfere with other ACL rules.
