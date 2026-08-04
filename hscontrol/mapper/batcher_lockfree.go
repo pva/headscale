@@ -32,6 +32,9 @@ type LockFreeBatcher struct {
 	done     chan struct{}
 	doneOnce sync.Once
 
+	// wg tracks doWork and all worker goroutines so Close can wait for them.
+	wg sync.WaitGroup
+
 	started atomic.Bool
 
 	// Batching state
@@ -160,6 +163,7 @@ func (b *LockFreeBatcher) Start() {
 	}
 
 	b.done = make(chan struct{})
+	b.wg.Add(1)
 
 	go b.doWork()
 }
@@ -173,6 +177,10 @@ func (b *LockFreeBatcher) Close() {
 		}
 	})
 
+	// Wait for workers to stop before tearing down their connections.
+	b.wg.Wait()
+	b.tick.Stop()
+
 	// Close the underlying channels supplying the data to the clients.
 	b.nodes.Range(func(nodeID types.NodeID, conn *multiChannelNodeConn) bool {
 		conn.close()
@@ -181,7 +189,10 @@ func (b *LockFreeBatcher) Close() {
 }
 
 func (b *LockFreeBatcher) doWork() {
+	defer b.wg.Done()
+
 	for i := range b.workers {
+		b.wg.Add(1)
 		go b.worker(i + 1)
 	}
 
@@ -205,6 +216,8 @@ func (b *LockFreeBatcher) doWork() {
 }
 
 func (b *LockFreeBatcher) worker(workerID int) {
+	defer b.wg.Done()
+
 	for {
 		select {
 		case w, ok := <-b.workCh:

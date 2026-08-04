@@ -18,6 +18,7 @@ type batcherFunc func(cfg *types.Config, state *state.State) Batcher
 
 // Batcher defines the common interface for all batcher implementations.
 type Batcher interface {
+	// Start spawns workers. Close blocks until they exit and the batcher must not be reused.
 	Start()
 	Close()
 	AddNode(id types.NodeID, c chan<- *tailcfg.MapResponse, version tailcfg.CapabilityVersion, stop func()) error
