@@ -38,6 +38,7 @@ func NewBatcher(batchTime time.Duration, workers int, mapper *mapper) *LockFreeB
 
 		// The size of this channel is arbitrary chosen, the sizing should be revisited.
 		workCh:         make(chan work, workers*200),
+		done:           make(chan struct{}),
 		nodes:          xsync.NewMap[types.NodeID, *multiChannelNodeConn](),
 		connected:      xsync.NewMap[types.NodeID, *time.Time](),
 		pendingChanges: xsync.NewMap[types.NodeID, []change.ChangeSet](),

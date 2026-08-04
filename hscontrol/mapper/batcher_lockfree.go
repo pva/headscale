@@ -90,6 +90,7 @@ func (b *LockFreeBatcher) AddNode(
 	if err != nil {
 		log.Error().Uint64("node.id", id.Uint64()).Err(err).Msg("Initial map generation failed")
 		nodeConn.removeConnectionByChannel(c)
+		b.markDisconnectedIfNoConns(id, nodeConn)
 		return fmt.Errorf("failed to generate initial map for node %d: %w", id, err)
 	}
 
@@ -103,6 +104,7 @@ func (b *LockFreeBatcher) AddNode(
 		log.Debug().Caller().Uint64("node.id", id.Uint64()).Dur("timeout.duration", 5*time.Second).
 			Msg("Initial map send timed out because channel was blocked or receiver not ready")
 		nodeConn.removeConnectionByChannel(c)
+		b.markDisconnectedIfNoConns(id, nodeConn)
 		return fmt.Errorf("failed to send initial map to node %d: timeout", id)
 	}
 
@@ -162,7 +164,6 @@ func (b *LockFreeBatcher) Start() {
 		return
 	}
 
-	b.done = make(chan struct{})
 	b.wg.Add(1)
 
 	go b.doWork()
@@ -172,9 +173,7 @@ func (b *LockFreeBatcher) Close() {
 	// Signal shutdown to all goroutines, only once. Do not close workCh:
 	// queueWork may still be sending on it concurrently.
 	b.doneOnce.Do(func() {
-		if b.done != nil {
-			close(b.done)
-		}
+		close(b.done)
 	})
 
 	// Wait for workers to stop before tearing down their connections.
@@ -385,19 +384,33 @@ func (b *LockFreeBatcher) cleanupOfflineNodes() {
 		return true
 	})
 
-	// Clean up the identified nodes
-	for _, nodeID := range nodesToCleanup {
-		log.Info().Uint64("node.id", nodeID.Uint64()).
-			Dur("offline_duration", cleanupThreshold).
-			Msg("Cleaning up node that has been offline for too long")
+	cleaned := 0
 
-		b.nodes.Delete(nodeID)
-		b.connected.Delete(nodeID)
-		b.totalNodes.Add(-1)
+	// Clean up the identified nodes. Keep all bookkeeping inside Compute so
+	// a concurrent AddNode cannot reconnect between deletion and bookkeeping.
+	for _, nodeID := range nodesToCleanup {
+		b.nodes.Compute(
+			nodeID,
+			func(conn *multiChannelNodeConn, loaded bool) (*multiChannelNodeConn, xsync.ComputeOp) {
+				if !loaded || conn == nil || conn.hasActiveConnections() {
+					return conn, xsync.CancelOp
+				}
+
+				b.connected.Delete(nodeID)
+				b.totalNodes.Add(-1)
+				cleaned++
+
+				log.Info().Uint64("node.id", nodeID.Uint64()).
+					Dur("offline_duration", cleanupThreshold).
+					Msg("Cleaning up node that has been offline for too long")
+
+				return conn, xsync.DeleteOp
+			},
+		)
 	}
 
-	if len(nodesToCleanup) > 0 {
-		log.Info().Int("cleaned_nodes", len(nodesToCleanup)).
+	if cleaned > 0 {
+		log.Info().Int("cleaned_nodes", cleaned).
 			Msg("Completed cleanup of long-offline nodes")
 	}
 }
@@ -453,6 +466,13 @@ func (b *LockFreeBatcher) ConnectedMap() *xsync.Map[types.NodeID, bool] {
 	})
 
 	return ret
+}
+
+func (b *LockFreeBatcher) markDisconnectedIfNoConns(id types.NodeID, nc *multiChannelNodeConn) {
+	if !nc.hasActiveConnections() {
+		now := time.Now()
+		b.connected.Store(id, &now)
+	}
 }
 
 // MapResponseFromChange queues work to generate a map response and waits for the result.
@@ -533,7 +553,9 @@ func (mc *multiChannelNodeConn) stopConnection(conn *connectionEntry) {
 // Caller must hold mc.mutex.
 func (mc *multiChannelNodeConn) removeConnectionAtIndexLocked(i int, stopConnection bool) *connectionEntry {
 	conn := mc.connections[i]
-	mc.connections = append(mc.connections[:i], mc.connections[i+1:]...)
+	copy(mc.connections[i:], mc.connections[i+1:])
+	mc.connections[len(mc.connections)-1] = nil
+	mc.connections = mc.connections[:len(mc.connections)-1]
 
 	if stopConnection {
 		mc.stopConnection(conn)
