@@ -3444,3 +3444,43 @@ func TestGitHubIssue2830_ExistingNodeCanReregisterWithUsedPreAuthKey(t *testing.
 	nodesAfterAttack := app.state.ListNodesByUser(types.UserID(user.ID))
 	require.Equal(t, 1, nodesAfterAttack.Len(), "Should still have exactly one node (attack prevented)")
 }
+
+func TestFollowupWaitPrefersCompletedAuthOverExpiredContext(t *testing.T) {
+	app := createTestApp(t)
+
+	machineKey := key.NewMachine().Public()
+	nodeKey := key.NewNode().Public()
+
+	const iterations = 100
+
+	for i := range iterations {
+		regID, err := types.NewRegistrationID()
+		require.NoError(t, err)
+
+		registered := make(chan *types.Node, 1)
+		app.state.SetRegistrationCacheEntry(regID, types.RegisterNode{
+			Node: types.Node{
+				MachineKey: machineKey,
+				Hostname:   "followup-race-node",
+			},
+			Registered: registered,
+		})
+
+		user := app.state.CreateUserForTest(fmt.Sprintf("followup-race-user-%d", i))
+		node := app.state.CreateNodeForTest(user, "followup-race-node")
+		node.MachineKey = machineKey
+		registered <- node
+
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+
+		resp, err := app.waitForFollowup(ctx, tailcfg.RegisterRequest{
+			Followup: fmt.Sprintf("http://localhost:8080/register/%s", regID),
+			NodeKey:  nodeKey,
+		}, machineKey)
+
+		require.NoError(t, err, "iteration %d", i)
+		require.NotNil(t, resp, "iteration %d", i)
+		assert.True(t, resp.MachineAuthorized, "iteration %d", i)
+	}
+}

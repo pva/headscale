@@ -273,24 +273,33 @@ func (h *Headscale) waitForFollowup(
 	}
 
 	if reg, ok := h.state.GetRegistrationCacheEntry(followupReg); ok {
-		select {
-		case <-ctx.Done():
-			return nil, NewHTTPError(http.StatusUnauthorized, "registration timed out", err)
-		case node := <-reg.Registered:
-			if node == nil {
-				// registration is expired in the cache, instruct the client to try a new registration
-				return h.reqToNewRegisterResponse(req, machineKey)
-			}
-			if node.MachineKey != machineKey {
-				return nil, NewHTTPError(
-					http.StatusUnauthorized,
-					"node exists with a different machine key",
-					nil,
-				)
-			}
+		var node *types.Node
 
-			return nodeToRegisterResponse(node.View()), nil
+		// Prefer a completed registration even if the context has also
+		// expired. A plain select chooses randomly when both are ready.
+		select {
+		case node = <-reg.Registered:
+		default:
+			select {
+			case <-ctx.Done():
+				return nil, NewHTTPError(http.StatusUnauthorized, "registration timed out", ctx.Err())
+			case node = <-reg.Registered:
+			}
 		}
+
+		if node == nil {
+			// registration is expired in the cache, instruct the client to try a new registration
+			return h.reqToNewRegisterResponse(req, machineKey)
+		}
+		if node.MachineKey != machineKey {
+			return nil, NewHTTPError(
+				http.StatusUnauthorized,
+				"node exists with a different machine key",
+				nil,
+			)
+		}
+
+		return nodeToRegisterResponse(node.View()), nil
 	}
 
 	// if the follow-up registration isn't found anymore, instruct the client to try a new registration
