@@ -1,6 +1,7 @@
 package types
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -259,6 +260,37 @@ func TestReadConfig(t *testing.T) {
 				t.Errorf("ReadConfig() mismatch (-want +got):\n%s", diff)
 			}
 		})
+	}
+}
+
+func TestConfigJSONOmitsSecrets(t *testing.T) {
+	const (
+		secretPostgresPass = "p0stgres-secret-marker"
+		secretClientSecret = "oidc-client-secret-marker"    //nolint:gosec // test marker, not a real credential
+		secretAPIKey       = "headscale-cli-api-key-marker" //nolint:gosec // test marker, not a real credential
+	)
+
+	cfg := &Config{
+		Database: DatabaseConfig{
+			Postgres: PostgresConfig{
+				Pass: secretPostgresPass,
+			},
+		},
+		OIDC: OIDCConfig{
+			ClientSecret: secretClientSecret,
+		},
+		CLI: CLIConfig{
+			APIKey: secretAPIKey,
+		},
+	}
+
+	out, err := json.Marshal(cfg)
+	require.NoError(t, err)
+
+	body := string(out)
+	for _, secret := range []string{secretPostgresPass, secretClientSecret, secretAPIKey} {
+		assert.NotContains(t, body, secret,
+			"marshalled Config must not contain secret %q", secret)
 	}
 }
 
