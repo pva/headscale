@@ -188,30 +188,33 @@ func (i *IPAllocator) next(prev netip.Addr, prefix *netip.Prefix) (*netip.Addr, 
 		return nil, err
 	}
 
+	// Random allocation chooses only the starting point, then scans every
+	// address once. This guarantees an exhausted prefix returns an error
+	// instead of repeatedly drawing occupied addresses forever under i.mu.
+	start := ip
 	for {
-		if !prefix.Contains(ip) {
-			return nil, ErrCouldNotAllocateIP
+		if prefix.Contains(ip) && !set.Contains(ip) && !isTailscaleReservedIP(ip) {
+			i.usedIPs.Add(ip)
+
+			return &ip, nil
 		}
 
-		// Check if the IP has already been allocated
-		// or if it is a IP reserved by Tailscale.
-		if set.Contains(ip) || isTailscaleReservedIP(ip) {
-			switch i.strategy {
-			case types.IPAllocationStrategySequential:
-				ip = ip.Next()
-			case types.IPAllocationStrategyRandom:
-				ip, err = randomNext(*prefix)
-				if err != nil {
-					return nil, fmt.Errorf("getting random IP: %w", err)
-				}
+		ip = ip.Next()
+
+		switch i.strategy {
+		case types.IPAllocationStrategySequential:
+			if !prefix.Contains(ip) {
+				return nil, ErrCouldNotAllocateIP
+			}
+		case types.IPAllocationStrategyRandom:
+			if !prefix.Contains(ip) {
+				ip = prefix.Masked().Addr()
 			}
 
-			continue
+			if ip == start {
+				return nil, ErrCouldNotAllocateIP
+			}
 		}
-
-		i.usedIPs.Add(ip)
-
-		return &ip, nil
 	}
 }
 
