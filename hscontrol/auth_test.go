@@ -3610,3 +3610,52 @@ func TestPreAuthKeyReauthRejectsNodeKeyClaimedByAnotherMachine(t *testing.T) {
 	_, ok = app.state.GetNodeByNodeKey(attackerNodeKey)
 	assert.True(t, ok, "attacker's original NodeKey must remain indexed")
 }
+
+func TestDeletedPreAuthKeyNotPersistedOnNodeUpdate(t *testing.T) {
+	app := createTestApp(t)
+
+	user := app.state.CreateUserForTest("deleted-pak-user")
+	pak, err := app.state.CreatePreAuthKey(
+		types.UserID(user.ID),
+		false,
+		false,
+		nil,
+		[]string{"tag:test"},
+	)
+	require.NoError(t, err)
+
+	machineKey := key.NewMachine().Public()
+	nodeKey := key.NewNode().Public()
+	_, err = app.handleRegister(context.Background(), tailcfg.RegisterRequest{
+		Auth:     &tailcfg.RegisterResponseAuth{AuthKey: pak.Key},
+		NodeKey:  nodeKey,
+		Hostinfo: &tailcfg.Hostinfo{Hostname: "deleted-pak-node"},
+	}, machineKey)
+	require.NoError(t, err)
+
+	node, ok := app.state.GetNodeByNodeKey(nodeKey)
+	require.True(t, ok)
+	require.True(t, node.AuthKeyID().Valid())
+
+	err = app.state.DeletePreAuthKey(pak)
+	require.NoError(t, err)
+
+	var pakCount int64
+	err = app.state.DB().DB.Model(&types.PreAuthKey{}).Where("id = ?", pak.ID).Count(&pakCount).Error
+	require.NoError(t, err)
+	require.Zero(t, pakCount)
+
+	_, err = app.state.UpdateNodeFromMapRequest(node.ID(), tailcfg.MapRequest{
+		NodeKey:  nodeKey,
+		DiscoKey: node.DiscoKey(),
+		Hostinfo: &tailcfg.Hostinfo{
+			Hostname:  "deleted-pak-node",
+			GoVersion: "go1.21",
+		},
+	})
+	require.NoError(t, err)
+
+	err = app.state.DB().DB.Model(&types.PreAuthKey{}).Where("id = ?", pak.ID).Count(&pakCount).Error
+	require.NoError(t, err)
+	assert.Zero(t, pakCount, "deleted pre-auth key must not be recreated")
+}

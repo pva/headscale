@@ -388,10 +388,11 @@ func (s *State) persistNodeToDB(node types.NodeView) (types.NodeView, change.Cha
 
 	nodePtr := node.AsStruct()
 
-	// Use Omit("expiry") to prevent overwriting expiry during MapRequest updates.
-	// Expiry should only be updated through explicit SetNodeExpiry calls or re-registration.
+	// Expiry is updated only through explicit expiry operations or re-registration.
+	// AuthKeyID/AuthKey may be stale in NodeStore after the referenced key is
+	// deleted, so never persist those fields from routine node updates.
 	// See: https://github.com/juanfont/headscale/issues/2862
-	err := s.db.DB.Omit("expiry").Updates(nodePtr).Error
+	err := s.db.DB.Omit("expiry", "AuthKeyID", "AuthKey").Updates(nodePtr).Error
 	if err != nil {
 		return types.NodeView{}, change.EmptySet, fmt.Errorf("saving node: %w", err)
 	}
@@ -1217,8 +1218,8 @@ func (s *State) HandleNodeFromAuthPath(
 		}
 
 		_, err = hsdb.Write(s.db.DB, func(tx *gorm.DB) (*types.Node, error) {
-			// Use Updates() to preserve fields not modified by UpdateNode.
-			err := tx.Updates(updatedNodeView.AsStruct()).Error
+			// Do not persist stale pre-auth key references from NodeStore.
+			err := tx.Omit("AuthKeyID", "AuthKey").Updates(updatedNodeView.AsStruct()).Error
 			if err != nil {
 				return nil, fmt.Errorf("failed to save node: %w", err)
 			}
@@ -1451,8 +1452,8 @@ func (s *State) HandleNodeFromPreAuthKey(
 		}
 
 		_, err = hsdb.Write(s.db.DB, func(tx *gorm.DB) (*types.Node, error) {
-			// Use Updates() to preserve fields not modified by UpdateNode.
-			err := tx.Updates(updatedNodeView.AsStruct()).Error
+			// Do not persist stale pre-auth key references from NodeStore.
+			err := tx.Omit("AuthKeyID", "AuthKey").Updates(updatedNodeView.AsStruct()).Error
 			if err != nil {
 				return nil, fmt.Errorf("failed to save node: %w", err)
 			}
