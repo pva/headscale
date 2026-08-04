@@ -140,12 +140,12 @@ type node struct {
 	n  *types.Node
 	ch chan *tailcfg.MapResponse
 
-	// Update tracking
+	// Update tracking (all accessed atomically for thread safety)
 	updateCount   int64
 	patchCount    int64
 	fullCount     int64
-	maxPeersCount int
-	lastPeerCount int
+	maxPeersCount atomic.Int64
+	lastPeerCount atomic.Int64
 	stop          chan struct{}
 	stopped       chan struct{}
 }
@@ -413,18 +413,32 @@ func (n *node) start() {
 					// Track update types
 					if info.IsFull {
 						atomic.AddInt64(&n.fullCount, 1)
-						n.lastPeerCount = info.PeerCount
-						// Update max peers seen
-						if info.PeerCount > n.maxPeersCount {
-							n.maxPeersCount = info.PeerCount
+						n.lastPeerCount.Store(int64(info.PeerCount))
+						// Update max peers seen using compare-and-swap for thread safety
+						for {
+							current := n.maxPeersCount.Load()
+							if int64(info.PeerCount) <= current {
+								break
+							}
+
+							if n.maxPeersCount.CompareAndSwap(current, int64(info.PeerCount)) {
+								break
+							}
 						}
 					}
 
 					if info.IsPatch {
 						atomic.AddInt64(&n.patchCount, 1)
-						// For patches, we track how many patch items
-						if info.PatchCount > n.maxPeersCount {
-							n.maxPeersCount = info.PatchCount
+						// For patches, we track how many patch items using compare-and-swap
+						for {
+							current := n.maxPeersCount.Load()
+							if int64(info.PatchCount) <= current {
+								break
+							}
+
+							if n.maxPeersCount.CompareAndSwap(current, int64(info.PatchCount)) {
+								break
+							}
 						}
 					}
 				}
@@ -456,8 +470,8 @@ func (n *node) cleanup() NodeStats {
 		TotalUpdates:  atomic.LoadInt64(&n.updateCount),
 		PatchUpdates:  atomic.LoadInt64(&n.patchCount),
 		FullUpdates:   atomic.LoadInt64(&n.fullCount),
-		MaxPeersSeen:  n.maxPeersCount,
-		LastPeerCount: n.lastPeerCount,
+		MaxPeersSeen:  int(n.maxPeersCount.Load()),
+		LastPeerCount: int(n.lastPeerCount.Load()),
 	}
 }
 
@@ -657,7 +671,7 @@ func TestBatcherScalabilityAllToAll(t *testing.T) {
 						for i := range allNodes {
 							node := &allNodes[i]
 							// Check current stats without stopping the tracking
-							currentMaxPeers := node.maxPeersCount
+							currentMaxPeers := int(node.maxPeersCount.Load())
 							if currentMaxPeers >= expectedPeers {
 								connectedCount++
 							}
