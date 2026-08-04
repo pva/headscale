@@ -1411,6 +1411,13 @@ func (s *State) HandleNodeFromPreAuthKey(
 			Str("user.name", pak.User.Username()).
 			Msg("Node re-registering with existing machine key and user, updating in place")
 
+		// Re-registration may rotate the NodeKey. Do not let it claim a key
+		// already bound to another machine and poison the NodeStore index.
+		if existing, ok := s.nodeStore.GetNodeByNodeKey(regReq.NodeKey); ok &&
+			existing.MachineKey() != machineKey {
+			return types.NodeView{}, change.EmptySet, fmt.Errorf("node key already in use by another machine")
+		}
+
 		// Update existing node - NodeStore first, then database
 		updatedNodeView, ok := s.nodeStore.UpdateNode(existingNodeSameUser.ID(), func(node *types.Node) {
 			node.NodeKey = regReq.NodeKey

@@ -3570,3 +3570,43 @@ func TestReauthRejectsNodeKeyClaimedByAnotherMachine(t *testing.T) {
 	_, ok = app.state.GetNodeByNodeKey(attackerNodeKey)
 	assert.True(t, ok, "attacker's original NodeKey must remain indexed")
 }
+
+func TestPreAuthKeyReauthRejectsNodeKeyClaimedByAnotherMachine(t *testing.T) {
+	app := createTestApp(t)
+
+	victim := app.state.CreateUserForTest("pak-nodekey-victim")
+	attacker := app.state.CreateUserForTest("pak-nodekey-attacker")
+	victimPAK, err := app.state.CreatePreAuthKey(types.UserID(victim.ID), true, false, nil, nil)
+	require.NoError(t, err)
+	attackerPAK, err := app.state.CreatePreAuthKey(types.UserID(attacker.ID), true, false, nil, nil)
+	require.NoError(t, err)
+
+	victimNodeKey := key.NewNode().Public()
+	victimMachine := key.NewMachine().Public()
+	_, err = app.handleRegisterWithAuthKey(tailcfg.RegisterRequest{
+		Auth:     &tailcfg.RegisterResponseAuth{AuthKey: victimPAK.Key},
+		NodeKey:  victimNodeKey,
+		Hostinfo: &tailcfg.Hostinfo{Hostname: "pak-nodekey-victim"},
+	}, victimMachine)
+	require.NoError(t, err)
+
+	attackerMachine := key.NewMachine().Public()
+	attackerNodeKey := key.NewNode().Public()
+	attackerReq := tailcfg.RegisterRequest{
+		Auth:     &tailcfg.RegisterResponseAuth{AuthKey: attackerPAK.Key},
+		NodeKey:  attackerNodeKey,
+		Hostinfo: &tailcfg.Hostinfo{Hostname: "pak-nodekey-attacker"},
+	}
+	_, err = app.handleRegisterWithAuthKey(attackerReq, attackerMachine)
+	require.NoError(t, err)
+
+	attackerReq.NodeKey = victimNodeKey
+	_, err = app.handleRegisterWithAuthKey(attackerReq, attackerMachine)
+	require.Error(t, err)
+
+	owner, ok := app.state.GetNodeByNodeKey(victimNodeKey)
+	require.True(t, ok)
+	assert.Equal(t, victimMachine, owner.MachineKey())
+	_, ok = app.state.GetNodeByNodeKey(attackerNodeKey)
+	assert.True(t, ok, "attacker's original NodeKey must remain indexed")
+}
