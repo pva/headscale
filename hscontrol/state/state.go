@@ -16,6 +16,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/hashicorp/golang-lru/v2/expirable"
 	hsdb "github.com/juanfont/headscale/hscontrol/db"
 	"github.com/juanfont/headscale/hscontrol/policy"
 	"github.com/juanfont/headscale/hscontrol/policy/matcher"
@@ -31,15 +32,15 @@ import (
 	"tailscale.com/types/key"
 	"tailscale.com/types/ptr"
 	"tailscale.com/types/views"
-	zcache "zgo.at/zcache/v2"
 )
 
 const (
 	// registerCacheExpiration defines how long node registration entries remain in cache.
 	registerCacheExpiration = time.Minute * 15
 
-	// registerCacheCleanup defines the interval for cleaning up expired cache entries.
-	registerCacheCleanup = time.Minute * 20
+	// registerCacheMaxEntries bounds pending registrations so unauthenticated
+	// clients cannot grow the cache without limit.
+	registerCacheMaxEntries = 1024
 )
 
 // ErrUnsupportedPolicyMode is returned for invalid policy modes. Valid modes are "file" and "db".
@@ -63,8 +64,8 @@ type State struct {
 	derpMap atomic.Pointer[tailcfg.DERPMap]
 	// polMan handles policy evaluation and management
 	polMan policy.PolicyManager
-	// registrationCache caches node registration data to reduce database load
-	registrationCache *zcache.Cache[types.RegistrationID, types.RegisterNode]
+	// registrationCache caches a bounded number of pending node registrations.
+	registrationCache *expirable.LRU[types.RegistrationID, types.RegisterNode]
 	// primaryRoutes tracks primary route assignments for nodes
 	primaryRoutes *routes.PrimaryRoutes
 }
@@ -77,26 +78,12 @@ func NewState(cfg *types.Config) (*State, error) {
 		cacheExpiration = cfg.Tuning.RegisterCacheExpiration
 	}
 
-	cacheCleanup := registerCacheCleanup
-	if cfg.Tuning.RegisterCacheCleanup != 0 {
-		cacheCleanup = cfg.Tuning.RegisterCacheCleanup
-	}
-
-	registrationCache := zcache.New[types.RegistrationID, types.RegisterNode](
-		cacheExpiration,
-		cacheCleanup,
-	)
-
-	registrationCache.OnEvicted(
-		func(id types.RegistrationID, rn types.RegisterNode) {
-			rn.SendAndClose(nil)
-		},
-	)
+	registrationCache := newRegistrationCache(cacheExpiration, registerCacheMaxEntries)
 
 	db, err := hsdb.NewHeadscaleDatabase(
 		cfg.Database,
 		cfg.BaseDomain,
-		registrationCache,
+		nil,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("init database: %w", err)
@@ -149,6 +136,19 @@ func NewState(cfg *types.Config) (*State, error) {
 		primaryRoutes:     routes.New(),
 		nodeStore:         nodeStore,
 	}, nil
+}
+
+func newRegistrationCache(
+	expiration time.Duration,
+	maxEntries int,
+) *expirable.LRU[types.RegistrationID, types.RegisterNode] {
+	return expirable.NewLRU[types.RegistrationID, types.RegisterNode](
+		maxEntries,
+		func(_ types.RegistrationID, rn types.RegisterNode) {
+			rn.SendAndClose(nil)
+		},
+		expiration,
+	)
 }
 
 // Close gracefully shuts down the State instance and releases all resources.
@@ -989,7 +989,7 @@ func (s *State) GetRegistrationCacheEntry(id types.RegistrationID) (*types.Regis
 
 // SetRegistrationCacheEntry stores a node registration in cache.
 func (s *State) SetRegistrationCacheEntry(id types.RegistrationID, entry types.RegisterNode) {
-	s.registrationCache.Set(id, entry)
+	s.registrationCache.Add(id, entry)
 }
 
 // logHostinfoValidation logs warnings when hostinfo is nil or has empty hostname.
@@ -1275,7 +1275,7 @@ func (s *State) HandleNodeFromAuthPath(
 	regEntry.SendAndClose(finalNode.AsStruct())
 
 	// Delete from registration cache
-	s.registrationCache.Delete(registrationID)
+	s.registrationCache.Remove(registrationID)
 
 	// Update policy managers
 	usersChange, err := s.updatePolicyManagerUsers()

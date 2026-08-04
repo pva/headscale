@@ -15,20 +15,20 @@ import (
 
 	"github.com/coreos/go-oidc/v3/oidc"
 	"github.com/gorilla/mux"
+	"github.com/hashicorp/golang-lru/v2/expirable"
 	"github.com/juanfont/headscale/hscontrol/db"
 	"github.com/juanfont/headscale/hscontrol/types"
 	"github.com/juanfont/headscale/hscontrol/types/change"
 	"github.com/juanfont/headscale/hscontrol/util"
 	"github.com/rs/zerolog/log"
 	"golang.org/x/oauth2"
-	"zgo.at/zcache/v2"
 )
 
 const (
 	randomByteSize           = 16
 	defaultOAuthOptionsCount = 3
 	registerCacheExpiration  = time.Minute * 15
-	registerCacheCleanup     = time.Minute * 20
+	registerCacheMaxEntries  = 1024
 )
 
 var (
@@ -54,7 +54,7 @@ type AuthProviderOIDC struct {
 	h                 *Headscale
 	serverURL         string
 	cfg               *types.OIDCConfig
-	registrationCache *zcache.Cache[string, RegistrationInfo]
+	registrationCache *expirable.LRU[string, RegistrationInfo]
 
 	oidcProvider *oidc.Provider
 	oauth2Config *oauth2.Config
@@ -81,9 +81,10 @@ func NewAuthProviderOIDC(
 		Scopes:       cfg.Scope,
 	}
 
-	registrationCache := zcache.New[string, RegistrationInfo](
+	registrationCache := expirable.NewLRU[string, RegistrationInfo](
+		registerCacheMaxEntries,
+		nil,
 		registerCacheExpiration,
-		registerCacheCleanup,
 	)
 
 	return &AuthProviderOIDC{
@@ -166,7 +167,7 @@ func (a *AuthProviderOIDC) RegisterHandler(
 	extras = append(extras, oidc.Nonce(nonce))
 
 	// Cache the registration info
-	a.registrationCache.Set(state, registrationInfo)
+	a.registrationCache.Add(state, registrationInfo)
 
 	authURL := a.oauth2Config.AuthCodeURL(state, extras...)
 	log.Debug().Caller().Msgf("Redirecting to %s for authentication", authURL)

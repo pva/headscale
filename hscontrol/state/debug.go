@@ -203,10 +203,10 @@ func (s *State) DebugSSHPolicies() map[string]*tailcfg.SSHPolicy {
 func (s *State) DebugRegistrationCache() map[string]interface{} {
 	// The cache doesn't expose internal statistics, so we provide basic info
 	result := map[string]interface{}{
-		"type":       "zcache",
-		"expiration": registerCacheExpiration.String(),
-		"cleanup":    registerCacheCleanup.String(),
-		"status":     "active",
+		"type":        "expirable-lru",
+		"expiration":  registerCacheExpiration.String(),
+		"max_entries": registerCacheMaxEntries,
+		"status":      "active",
 	}
 
 	return result
