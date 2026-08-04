@@ -98,6 +98,10 @@ func NewAuthProviderOIDC(
 	}, nil
 }
 
+func (a *AuthProviderOIDC) cookiesSecure() bool {
+	return strings.HasPrefix(a.serverURL, "https://")
+}
+
 func (a *AuthProviderOIDC) AuthURL(registrationID types.RegistrationID) string {
 	return fmt.Sprintf(
 		"%s/register/%s",
@@ -125,14 +129,14 @@ func (a *AuthProviderOIDC) RegisterHandler(
 	}
 
 	// Set the state and nonce cookies to protect against CSRF attacks
-	state, err := setCSRFCookie(writer, req, "state")
+	state, err := setCSRFCookie(writer, req, "state", a.cookiesSecure())
 	if err != nil {
 		httpError(writer, err)
 		return
 	}
 
 	// Set the state and nonce cookies to protect against CSRF attacks
-	nonce, err := setCSRFCookie(writer, req, "nonce")
+	nonce, err := setCSRFCookie(writer, req, "nonce", a.cookiesSecure())
 	if err != nil {
 		httpError(writer, err)
 		return
@@ -240,6 +244,9 @@ func (a *AuthProviderOIDC) OIDCCallbackHandler(
 		httpError(writer, NewHTTPError(http.StatusForbidden, "nonce did not match", nil))
 		return
 	}
+
+	clearOIDCCallbackCookie(writer, stateCookieName)
+	clearOIDCCallbackCookie(writer, nonceCookieName)
 
 	nodeExpiry := a.determineNodeExpiry(idToken.Expiry)
 
@@ -475,12 +482,13 @@ func validateOIDCAllowedUsers(
 	return nil
 }
 
-// getRegistrationIDFromState retrieves the registration ID from the state.
+// getRegistrationIDFromState retrieves and consumes the registration ID.
 func (a *AuthProviderOIDC) getRegistrationIDFromState(state string) *types.RegistrationID {
 	regInfo, ok := a.registrationCache.Get(state)
 	if !ok {
 		return nil
 	}
+	a.registrationCache.Remove(state)
 
 	return &regInfo.RegistrationID
 }
@@ -584,7 +592,15 @@ func getCookieName(baseName, value string) string {
 	return fmt.Sprintf("%s_%s", baseName, value[:6])
 }
 
-func setCSRFCookie(w http.ResponseWriter, r *http.Request, name string) (string, error) {
+func clearOIDCCallbackCookie(w http.ResponseWriter, name string) {
+	http.SetCookie(w, &http.Cookie{
+		Name:   name,
+		Path:   "/oidc/callback",
+		MaxAge: -1,
+	})
+}
+
+func setCSRFCookie(w http.ResponseWriter, r *http.Request, name string, secure bool) (string, error) {
 	val, err := util.GenerateRandomStringURLSafe(64)
 	if err != nil {
 		return val, err
@@ -595,7 +611,7 @@ func setCSRFCookie(w http.ResponseWriter, r *http.Request, name string) (string,
 		Name:     getCookieName(name, val),
 		Value:    val,
 		MaxAge:   int(time.Hour.Seconds()),
-		Secure:   r.TLS != nil,
+		Secure:   secure || r.TLS != nil,
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
 	}
