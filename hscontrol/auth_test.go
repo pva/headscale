@@ -3484,3 +3484,36 @@ func TestFollowupWaitPrefersCompletedAuthOverExpiredContext(t *testing.T) {
 		assert.True(t, resp.MachineAuthorized, "iteration %d", i)
 	}
 }
+
+func TestNewRegistrationRejectsNodeKeyClaimedByAnotherMachine(t *testing.T) {
+	app := createTestApp(t)
+
+	victim := app.state.CreateUserForTest("nodekey-victim")
+	attacker := app.state.CreateUserForTest("nodekey-attacker")
+	victimPAK, err := app.state.CreatePreAuthKey(types.UserID(victim.ID), true, false, nil, nil)
+	require.NoError(t, err)
+	attackerPAK, err := app.state.CreatePreAuthKey(types.UserID(attacker.ID), true, false, nil, nil)
+	require.NoError(t, err)
+
+	sharedNodeKey := key.NewNode().Public()
+	victimMachine := key.NewMachine().Public()
+	victimReq := tailcfg.RegisterRequest{
+		Auth:     &tailcfg.RegisterResponseAuth{AuthKey: victimPAK.Key},
+		NodeKey:  sharedNodeKey,
+		Hostinfo: &tailcfg.Hostinfo{Hostname: "nodekey-victim"},
+	}
+	_, err = app.handleRegisterWithAuthKey(victimReq, victimMachine)
+	require.NoError(t, err)
+
+	attackReq := tailcfg.RegisterRequest{
+		Auth:     &tailcfg.RegisterResponseAuth{AuthKey: attackerPAK.Key},
+		NodeKey:  sharedNodeKey,
+		Hostinfo: &tailcfg.Hostinfo{Hostname: "nodekey-attacker"},
+	}
+	_, err = app.handleRegisterWithAuthKey(attackReq, key.NewMachine().Public())
+	require.Error(t, err)
+
+	owner, ok := app.state.GetNodeByNodeKey(sharedNodeKey)
+	require.True(t, ok)
+	assert.Equal(t, victimMachine, owner.MachineKey())
+}

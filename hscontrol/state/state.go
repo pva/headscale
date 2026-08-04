@@ -1054,6 +1054,13 @@ func (s *State) createAndSaveNewNode(params newNodeParams) (types.NodeView, erro
 		)
 	}
 
+	// A NodeKey is public and must remain bound to one machine. Refuse a new
+	// registration that would overwrite another machine's NodeKey index entry.
+	if existing, ok := s.nodeStore.GetNodeByNodeKey(params.NodeKey); ok &&
+		existing.MachineKey() != params.MachineKey {
+		return types.NodeView{}, fmt.Errorf("node key already in use by another machine")
+	}
+
 	// Prepare the node for registration
 	nodeToRegister := types.Node{
 		Hostname:       params.Hostname,
