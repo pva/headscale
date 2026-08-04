@@ -234,17 +234,21 @@ func (b *LockFreeBatcher) worker(workerID int) {
 			if w.resultCh != nil {
 				var result workResult
 				if nc, exists := b.nodes.Load(w.nodeID); exists {
+					nc.workMu.Lock()
+
 					var err error
-					result.mapResponse, err = generateMapResponse(nc.nodeID(), nc.version(), b.mapper, w.c)
+					result.mapResponse, err = generateMapResponse(nc.nodeID(), nc.version(), b.mapper, w.changes[0])
 					result.err = err
 					if result.err != nil {
 						b.workErrors.Add(1)
 						log.Error().Err(result.err).
 							Int("worker.id", workerID).
 							Uint64("node.id", w.nodeID.Uint64()).
-							Str("change", w.c.Change.String()).
+							Str("change", w.changes[0].Change.String()).
 							Msg("failed to generate map response for synchronous work")
 					}
+
+					nc.workMu.Unlock()
 				} else {
 					result.err = fmt.Errorf("node %d not found", w.nodeID)
 
@@ -269,17 +273,21 @@ func (b *LockFreeBatcher) worker(workerID int) {
 			// that should be processed and sent to the node instead of
 			// returned to the caller.
 			if nc, exists := b.nodes.Load(w.nodeID); exists {
-				// Apply change to node - this will handle offline nodes gracefully
-				// and queue work for when they reconnect
-				err := nc.change(w.c)
-				if err != nil {
-					b.workErrors.Add(1)
-					log.Error().Err(err).
-						Int("worker.id", workerID).
-						Uint64("node.id", w.c.NodeID.Uint64()).
-						Str("change", w.c.Change.String()).
-						Msg("failed to apply change")
+				nc.workMu.Lock()
+				for _, c := range w.changes {
+					// Apply change to node - this will handle offline nodes gracefully
+					// and queue work for when they reconnect
+					err := nc.change(c)
+					if err != nil {
+						b.workErrors.Add(1)
+						log.Error().Err(err).
+							Int("worker.id", workerID).
+							Uint64("node.id", c.NodeID.Uint64()).
+							Str("change", c.Change.String()).
+							Msg("failed to apply change")
+					}
 				}
+				nc.workMu.Unlock()
 			}
 		case <-b.done:
 			log.Debug().Int("worker.id", workerID).Msg("batcher shutting down, exiting worker")
@@ -351,10 +359,8 @@ func (b *LockFreeBatcher) processBatchedChanges() {
 			return true
 		}
 
-		// Send all batched changes for this node
-		for _, c := range changes {
-			b.queueWork(work{c: c, nodeID: nodeID, resultCh: nil})
-		}
+		// Queue one item per node so one worker applies its changes in order.
+		b.queueWork(work{changes: changes, nodeID: nodeID, resultCh: nil})
 
 		// Clear the pending changes for this node
 		b.pendingChanges.Delete(nodeID)
@@ -481,7 +487,7 @@ func (b *LockFreeBatcher) MapResponseFromChange(id types.NodeID, c change.Change
 	resultCh := make(chan workResult, 1)
 
 	// Queue the work with a result channel using the safe queueing method
-	b.queueWork(work{c: c, nodeID: id, resultCh: resultCh})
+	b.queueWork(work{changes: []change.ChangeSet{c}, nodeID: id, resultCh: resultCh})
 
 	// Wait for the result
 	select {
@@ -510,6 +516,7 @@ type multiChannelNodeConn struct {
 
 	mutex       sync.RWMutex
 	connections []*connectionEntry
+	workMu      sync.Mutex
 
 	updateCount atomic.Int64
 }

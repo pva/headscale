@@ -187,9 +187,10 @@ type workResult struct {
 	err         error
 }
 
-// work represents a unit of work to be processed by workers.
+// work represents all pending changes for a node. Bundling the changes keeps
+// their processing ordered when multiple workers consume the queue.
 type work struct {
-	c        change.ChangeSet
+	changes  []change.ChangeSet
 	nodeID   types.NodeID
 	resultCh chan<- workResult // optional channel for synchronous operations
 }
