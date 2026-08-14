@@ -239,6 +239,13 @@ func (s *State) ReloadPolicy() ([]change.ChangeSet, error) {
 
 	cs := []change.ChangeSet{change.PolicyChange()}
 
+	// A policy broadcast rebuilds peer lists and filters, but a node's own
+	// CapMap is carried only on its self entry. Selectively refresh every node
+	// whose compiled nodeAttrs changed since the previous drain.
+	for _, id := range s.polMan.NodesWithChangedCapMap() {
+		cs = append(cs, change.FullSelf(id))
+	}
+
 	// Always call autoApproveNodes during policy reload, regardless of whether
 	// the policy content has changed. This ensures that routes are re-evaluated
 	// when they might have been manually disabled but could now be auto-approved
@@ -852,6 +859,16 @@ func (s *State) FilterForNode(node types.NodeView) ([]tailcfg.FilterRule, error)
 // MatchersForNode returns matchers for peer relationship determination (unreduced).
 func (s *State) MatchersForNode(node types.NodeView) ([]matcher.Match, error) {
 	return s.polMan.MatchersForNode(node)
+}
+
+// NodeCapMap returns the policy-derived CapMap for the given node.
+func (s *State) NodeCapMap(id types.NodeID) tailcfg.NodeCapMap {
+	return s.polMan.NodeCapMap(id)
+}
+
+// NodeCapMaps returns a snapshot of every node's policy-derived CapMap.
+func (s *State) NodeCapMaps() map[types.NodeID]tailcfg.NodeCapMap {
+	return s.polMan.NodeCapMaps()
 }
 
 // NodeCanHaveTag checks if a node is allowed to have a specific tag.

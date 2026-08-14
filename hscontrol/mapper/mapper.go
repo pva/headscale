@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"os"
 	"path"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -99,6 +100,7 @@ func generateUserProfiles(
 func generateDNSConfig(
 	cfg *types.Config,
 	node types.NodeView,
+	capMap tailcfg.NodeCapMap,
 ) *tailcfg.DNSConfig {
 	if cfg.TailcfgDNSConfig == nil {
 		return nil
@@ -106,32 +108,119 @@ func generateDNSConfig(
 
 	dnsConfig := cfg.TailcfgDNSConfig.Clone()
 
-	addNextDNSMetadata(dnsConfig.Resolvers, node)
+	profile := nextDNSProfileFromCapMap(capMap)
+	if profile != "" {
+		applyNextDNSProfile(dnsConfig.Resolvers, profile)
+		applyNextDNSProfile(dnsConfig.FallbackResolvers, profile)
+
+		for suffix, resolvers := range dnsConfig.Routes {
+			applyNextDNSProfile(resolvers, profile)
+			dnsConfig.Routes[suffix] = resolvers
+		}
+	}
+
+	if _, suppressMetadata := capMap[nextDNSAttrNoInfo]; !suppressMetadata {
+		addNextDNSMetadata(dnsConfig.Resolvers, node)
+		addNextDNSMetadata(dnsConfig.FallbackResolvers, node)
+
+		for suffix, resolvers := range dnsConfig.Routes {
+			addNextDNSMetadata(resolvers, node)
+			dnsConfig.Routes[suffix] = resolvers
+		}
+	}
 
 	return dnsConfig
 }
 
-// If any nextdns DoH resolvers are present in the list of resolvers it will
-// take metadata from the node metadata and instruct tailscale to add it
-// to the requests. This makes it possible to identify from which device the
-// requests come in the NextDNS dashboard.
-//
-// This will produce a resolver like:
-// `https://dns.nextdns.io/<nextdns-id>?device_name=node-name&device_model=linux&device_ip=100.64.0.1`
+// nextDNSAttrPrefix is the form Tailscale uses for per-node NextDNS profile
+// selection. nextdns:no-device-info suppresses device metadata.
+const (
+	nextDNSAttrPrefix                        = "nextdns:"
+	nextDNSAttrNoInfo tailcfg.NodeCapability = "nextdns:no-device-info"
+)
+
+var nextDNSProfileRE = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
+
+// nextDNSProfileFromCapMap returns the deterministic, validated per-node
+// NextDNS profile selected through nodeAttrs.
+func nextDNSProfileFromCapMap(capMap tailcfg.NodeCapMap) string {
+	if len(capMap) == 0 {
+		return ""
+	}
+
+	candidates := make([]string, 0, len(capMap))
+	for capability := range capMap {
+		if capability == nextDNSAttrNoInfo {
+			continue
+		}
+
+		profile, ok := strings.CutPrefix(string(capability), nextDNSAttrPrefix)
+		if !ok || profile == "" {
+			continue
+		}
+
+		if !nextDNSProfileRE.MatchString(profile) {
+			log.Warn().
+				Str("cap", string(capability)).
+				Msg("nextdns profile rejected: must match [A-Za-z0-9._-]{1,64}")
+			continue
+		}
+
+		candidates = append(candidates, profile)
+	}
+
+	if len(candidates) == 0 {
+		return ""
+	}
+
+	slices.Sort(candidates)
+
+	return candidates[0]
+}
+
+// nextDNSDoHHost matches only the configured NextDNS DoH host, not a
+// lookalike hostname or a URL containing it in a path or query.
+func nextDNSDoHHost(addr string) bool {
+	return addr == nextDNSDoHPrefix ||
+		strings.HasPrefix(addr, nextDNSDoHPrefix+"/") ||
+		strings.HasPrefix(addr, nextDNSDoHPrefix+"?")
+}
+
+// applyNextDNSProfile replaces the global NextDNS profile with the policy
+// selected per-node profile.
+func applyNextDNSProfile(resolvers []*dnstype.Resolver, profile string) {
+	for _, resolver := range resolvers {
+		if !nextDNSDoHHost(resolver.Addr) {
+			continue
+		}
+
+		resolver.Addr = nextDNSDoHPrefix + "/" + profile
+	}
+}
+
+// addNextDNSMetadata preserves existing query parameters and appends encoded
+// device metadata to every NextDNS DoH resolver.
 func addNextDNSMetadata(resolvers []*dnstype.Resolver, node types.NodeView) {
 	for _, resolver := range resolvers {
-		if strings.HasPrefix(resolver.Addr, nextDNSDoHPrefix) {
-			attrs := url.Values{
-				"device_name":  []string{node.Hostname()},
-				"device_model": []string{node.Hostinfo().OS()},
-			}
-
-			if len(node.IPs()) > 0 {
-				attrs.Add("device_ip", node.IPs()[0].String())
-			}
-
-			resolver.Addr = fmt.Sprintf("%s?%s", resolver.Addr, attrs.Encode())
+		if !nextDNSDoHHost(resolver.Addr) {
+			continue
 		}
+
+		parsed, err := url.Parse(resolver.Addr)
+		if err != nil {
+			continue
+		}
+
+		query := parsed.Query()
+		query.Set("device_name", node.Hostname())
+		query.Set("device_model", node.Hostinfo().OS())
+
+		if ips := node.IPs(); len(ips) > 0 {
+			query.Set("device_ip", ips[0].String())
+		}
+
+		parsed.RawQuery = query.Encode()
+		resolver.Addr = parsed.String()
 	}
 }
 

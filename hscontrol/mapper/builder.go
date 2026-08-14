@@ -2,6 +2,7 @@ package mapper
 
 import (
 	"errors"
+	"maps"
 	"net/netip"
 	"sort"
 	"time"
@@ -87,6 +88,14 @@ func (b *MapResponseBuilder) WithSelfNode() *MapResponseBuilder {
 		return b
 	}
 
+	if policyCaps := b.mapper.state.NodeCapMap(nv.ID()); len(policyCaps) > 0 {
+		if tailnode.CapMap == nil {
+			tailnode.CapMap = make(tailcfg.NodeCapMap, len(policyCaps))
+		}
+
+		maps.Copy(tailnode.CapMap, policyCaps)
+	}
+
 	b.resp.Node = tailnode
 
 	return b
@@ -154,7 +163,11 @@ func (b *MapResponseBuilder) WithDNSConfig() *MapResponseBuilder {
 		return b
 	}
 
-	b.resp.DNSConfig = generateDNSConfig(b.mapper.cfg, node)
+	b.resp.DNSConfig = generateDNSConfig(
+		b.mapper.cfg,
+		node,
+		b.mapper.state.NodeCapMap(node.ID()),
+	)
 
 	return b
 }
@@ -259,6 +272,22 @@ func (b *MapResponseBuilder) buildTailPeers(peers views.Slice[types.NodeView]) (
 		b.mapper.cfg)
 	if err != nil {
 		return nil, err
+	}
+
+	// tailNodes preserves changedViews order. Merge each peer's policy-derived
+	// nodeAttrs before the final ID sort so peer-side capability consumers see
+	// the same attributes the peer receives on its self entry.
+	for index, peer := range changedViews.All() {
+		policyCaps := b.mapper.state.NodeCapMap(peer.ID())
+		if len(policyCaps) == 0 {
+			continue
+		}
+
+		if tailPeers[index].CapMap == nil {
+			tailPeers[index].CapMap = make(tailcfg.NodeCapMap, len(policyCaps))
+		}
+
+		maps.Copy(tailPeers[index].CapMap, policyCaps)
 	}
 
 	// Peers is always returned sorted by Node.ID.
