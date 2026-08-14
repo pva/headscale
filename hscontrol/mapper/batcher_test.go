@@ -58,7 +58,7 @@ func (t *testBatcherWrapper) AddNode(
 
 	// Send the online notification that poll.go would normally send
 	// This ensures other nodes get notified about this node coming online
-	t.AddWork(change.NodeOnline(id))
+	t.AddWork(change.NodeOnline(id, time.Now()))
 
 	return nil
 }
@@ -77,7 +77,7 @@ func (t *testBatcherWrapper) RemoveNode(id types.NodeID, c chan<- *tailcfg.MapRe
 
 	// Send the offline notification that poll.go would normally send
 	// Do this BEFORE removing from batcher so the change can be processed
-	t.AddWork(change.NodeOffline(id))
+	t.AddWork(change.NodeOffline(id, time.Now()))
 
 	// Finally remove from the real batcher
 	removed := t.Batcher.RemoveNode(id, c)
@@ -366,6 +366,7 @@ func assertOnlineMapResponse(t *testing.T, resp *tailcfg.MapResponse, expected b
 	if len(resp.PeersChangedPatch) > 0 {
 		require.Len(t, resp.PeersChangedPatch, 1)
 		assert.Equal(t, expected, *resp.PeersChangedPatch[0].Online)
+		require.NotNil(t, resp.PeersChangedPatch[0].LastSeen)
 
 		return
 	}
@@ -373,6 +374,40 @@ func assertOnlineMapResponse(t *testing.T, resp *tailcfg.MapResponse, expected b
 	// Fallback to old format for backwards compatibility
 	require.Len(t, resp.Peers, 1)
 	assert.Equal(t, expected, resp.Peers[0].Online)
+	require.NotNil(t, resp.Peers[0].LastSeen)
+}
+
+func TestGenerateMapResponseOnlineOfflineIncludesLastSeen(t *testing.T) {
+	t.Parallel()
+
+	lastSeen := time.Date(2026, time.August, 11, 12, 0, 0, 0, time.UTC)
+	m := &mapper{}
+
+	tests := []struct {
+		name       string
+		change     change.ChangeSet
+		wantOnline bool
+	}{
+		{name: "online", change: change.NodeOnline(2, lastSeen), wantOnline: true},
+		{name: "offline", change: change.NodeOffline(2, lastSeen), wantOnline: false},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			resp, err := generateMapResponse(1, tailcfg.CurrentCapabilityVersion, m, test.change)
+			require.NoError(t, err)
+			require.Len(t, resp.PeersChangedPatch, 1)
+
+			patch := resp.PeersChangedPatch[0]
+			assert.Equal(t, tailcfg.NodeID(2), patch.NodeID)
+			require.NotNil(t, patch.Online)
+			assert.Equal(t, test.wantOnline, *patch.Online)
+			require.NotNil(t, patch.LastSeen)
+			assert.Equal(t, lastSeen, *patch.LastSeen)
+		})
+	}
 }
 
 // UpdateInfo contains parsed information about an update.

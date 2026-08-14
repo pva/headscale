@@ -96,8 +96,9 @@ func generateMapResponse(nodeID types.NodeID, version tailcfg.CapabilityVersion,
 
 			mapResp, err = mapper.peerChangedPatchResponse(nodeID, []*tailcfg.PeerChange{
 				{
-					NodeID: c.NodeID.NodeID(),
-					Online: ptr.To(onlineStatus),
+					NodeID:   c.NodeID.NodeID(),
+					Online:   ptr.To(onlineStatus),
+					LastSeen: c.LastSeen,
 				},
 			})
 		}

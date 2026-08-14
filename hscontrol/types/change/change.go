@@ -70,6 +70,11 @@ type ChangeSet struct {
 	// IsSubnetRouter indicates whether the node is a subnet router.
 	IsSubnetRouter bool
 
+	// LastSeen is set when the change is NodeCameOnline or NodeWentOffline.
+	// Per the tailcfg protocol, a non-nil PeerChange.LastSeen indicates that
+	// the node's online status changed.
+	LastSeen *time.Time
+
 	// NodeExpiry is set if the change is NodeKeyExpiry.
 	NodeExpiry *time.Time
 }
@@ -174,17 +179,19 @@ func NodeRemoved(id types.NodeID) ChangeSet {
 	}
 }
 
-func NodeOnline(id types.NodeID) ChangeSet {
+func NodeOnline(id types.NodeID, lastSeen time.Time) ChangeSet {
 	return ChangeSet{
-		Change: NodeCameOnline,
-		NodeID: id,
+		Change:   NodeCameOnline,
+		NodeID:   id,
+		LastSeen: &lastSeen,
 	}
 }
 
-func NodeOffline(id types.NodeID) ChangeSet {
+func NodeOffline(id types.NodeID, lastSeen time.Time) ChangeSet {
 	return ChangeSet{
-		Change: NodeWentOffline,
-		NodeID: id,
+		Change:   NodeWentOffline,
+		NodeID:   id,
+		LastSeen: &lastSeen,
 	}
 }
 

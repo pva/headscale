@@ -15,6 +15,7 @@ import (
 	"tailscale.com/net/tsaddr"
 	"tailscale.com/tailcfg"
 	"tailscale.com/types/key"
+	"tailscale.com/types/ptr"
 )
 
 func TestTailNode(t *testing.T) {
@@ -104,6 +105,7 @@ func TestTailNode(t *testing.T) {
 				ForcedTags: []string{},
 				AuthKey:    &types.PreAuthKey{},
 				LastSeen:   &lastSeen,
+				IsOnline:   ptr.To(true),
 				Expiry:     &expire,
 				Hostinfo: &tailcfg.Hostinfo{
 					RoutableIPs: []netip.Prefix{
@@ -156,7 +158,9 @@ func TestTailNode(t *testing.T) {
 						netip.MustParsePrefix("172.0.0.0/10"),
 					},
 				}),
-				Created: created,
+				Created:  created,
+				LastSeen: &lastSeen,
+				Online:   ptr.To(true),
 
 				Tags: []string{},
 

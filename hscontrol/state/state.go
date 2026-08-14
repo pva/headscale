@@ -463,19 +463,20 @@ func (s *State) DeleteNode(node types.NodeView) (change.ChangeSet, error) {
 // The returned generation must be passed to Disconnect.
 func (s *State) Connect(id types.NodeID) ([]change.ChangeSet, uint64) {
 	gen := s.nextConnectGen(id)
+	connectedAt := time.Now()
 
 	// CRITICAL FIX: Update the online status in NodeStore BEFORE creating change notification
 	// This ensures that when the NodeCameOnline change is distributed and processed by other nodes,
 	// the NodeStore already reflects the correct online status for full map generation.
-	// now := time.Now()
 	node, ok := s.nodeStore.UpdateNode(id, func(n *types.Node) {
 		n.IsOnline = ptr.To(true)
-		// n.LastSeen = ptr.To(now)
+		// LastSeen is frozen at connect time while the node remains online.
+		n.LastSeen = ptr.To(connectedAt)
 	})
 	if !ok {
 		return nil, gen
 	}
-	c := []change.ChangeSet{change.NodeOnline(id)}
+	c := []change.ChangeSet{change.NodeOnline(id, connectedAt)}
 
 	log.Info().Uint64("node.id", id.Uint64()).Str("node.name", node.Hostname()).Msg("Node connected")
 
@@ -555,7 +556,7 @@ func (s *State) Disconnect(id types.NodeID, gen uint64) ([]change.ChangeSet, err
 	// announced are served to any nodes.
 	routeChange := s.primaryRoutes.SetRoutes(id)
 
-	cs := []change.ChangeSet{change.NodeOffline(id), c}
+	cs := []change.ChangeSet{change.NodeOffline(id, now), c}
 
 	// If we have a policy change or route change, return that as it's more comprehensive
 	// Otherwise, return the NodeOffline change to ensure nodes are notified

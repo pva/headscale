@@ -133,10 +133,10 @@ func tailNode(
 		tNode.CapMap[tailcfg.NodeAttrRandomizeClientPort] = []tailcfg.RawMessage{}
 	}
 
-	// Set LastSeen only for offline nodes to avoid confusing Tailscale clients
-	// during rapid reconnection cycles. Online nodes should not have LastSeen set
-	// as this can make clients interpret them as "not online" despite Online=true.
-	if node.LastSeen().Valid() && node.IsOnline().Valid() && !node.IsOnline().Get() {
+	// LastSeen is when the node was last online. Per the tailcfg protocol it
+	// stays frozen at connect time while online and is nil only if the node has
+	// never been online, so send it whenever it is known.
+	if node.LastSeen().Valid() {
 		lastSeen := node.LastSeen().Get()
 		tNode.LastSeen = &lastSeen
 	}
