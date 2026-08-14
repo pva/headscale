@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/juanfont/headscale/hscontrol/policy"
+	policyv2 "github.com/juanfont/headscale/hscontrol/policy/v2"
 	"github.com/juanfont/headscale/hscontrol/types"
 	"tailscale.com/tailcfg"
 	"tailscale.com/types/views"
@@ -264,6 +265,10 @@ func (b *MapResponseBuilder) buildTailPeers(peers views.Slice[types.NodeView]) (
 		changedViews = peers
 	}
 
+	// Snapshot the per-node policy CapMap once per peer-list build
+	// instead of locking the policy manager per peer.
+	allCapMaps := b.mapper.state.NodeCapMaps()
+
 	tailPeers, err := tailNodes(
 		changedViews, b.capVer, b.mapper.state,
 		func(id types.NodeID) []netip.Prefix {
@@ -274,20 +279,11 @@ func (b *MapResponseBuilder) buildTailPeers(peers views.Slice[types.NodeView]) (
 		return nil, err
 	}
 
-	// tailNodes preserves changedViews order. Merge each peer's policy-derived
-	// nodeAttrs before the final ID sort so peer-side capability consumers see
-	// the same attributes the peer receives on its self entry.
+	// tailNodes preserves changedViews order. Peer.CapMap contains only
+	// capabilities consumed from the peer view and only when the peer satisfies
+	// the capability's emission conditions.
 	for index, peer := range changedViews.All() {
-		policyCaps := b.mapper.state.NodeCapMap(peer.ID())
-		if len(policyCaps) == 0 {
-			continue
-		}
-
-		if tailPeers[index].CapMap == nil {
-			tailPeers[index].CapMap = make(tailcfg.NodeCapMap, len(policyCaps))
-		}
-
-		maps.Copy(tailPeers[index].CapMap, policyCaps)
+		tailPeers[index].CapMap = policyv2.PeerCapMap(peer, allCapMaps[peer.ID()])
 	}
 
 	// Peers is always returned sorted by Node.ID.
