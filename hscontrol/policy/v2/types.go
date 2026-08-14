@@ -34,6 +34,22 @@ const Wildcard = Asterix(0)
 
 var ErrAutogroupSelfRequiresPerNodeResolution = errors.New("autogroup:self requires per-node resolution and cannot be resolved in this context")
 
+// NodeAttrs validation errors.
+var (
+	ErrNodeAttrsIPPoolReserved      = errors.New("nodeAttrs ipPool must not overlap reserved Tailscale ranges")
+	ErrNodeAttrsIPPoolOutOfRange    = errors.New("nodeAttrs ipPool must be within 100.64.0.0/10")
+	ErrNodeAttrsAutogroupNotAllowed = errors.New("nodeAttrs target does not support this autogroup")
+	ErrNodeAttrUnsupported          = errors.New("nodeAttrs uses a feature headscale does not yet support")
+	ErrNodeAttrIPPoolUnsupported    = errors.New("nodeAttrs ipPool requires the IP allocator (https://github.com/juanfont/headscale/issues/2912)")
+	ErrNodeAttrTargetUnsupported    = errors.New("nodeAttrs target alias type is not supported")
+)
+
+// These capabilities need server-side machinery that this version of
+// headscale does not provide, so accepting them would be misleading.
+var nodeAttrUnsupportedCaps = map[tailcfg.NodeCapability]string{
+	tailcfg.NodeAttrFunnel: "https://github.com/juanfont/headscale/issues/2527",
+}
+
 type Asterix int
 
 func (a Asterix) Validate() error {
@@ -1579,12 +1595,23 @@ type Policy struct {
 	// callers using it should panic if not
 	validated bool `json:"-"`
 
-	Groups        Groups             `json:"groups,omitempty"`
-	Hosts         Hosts              `json:"hosts,omitempty"`
-	TagOwners     TagOwners          `json:"tagOwners,omitempty"`
-	ACLs          []ACL              `json:"acls,omitempty"`
-	AutoApprovers AutoApproverPolicy `json:"autoApprovers"`
-	SSHs          []SSH              `json:"ssh,omitempty"`
+	Groups              Groups             `json:"groups,omitempty"`
+	Hosts               Hosts              `json:"hosts,omitempty"`
+	TagOwners           TagOwners          `json:"tagOwners,omitempty"`
+	ACLs                []ACL              `json:"acls,omitempty"`
+	NodeAttrs           []NodeAttrGrant    `json:"nodeAttrs,omitempty"`
+	AutoApprovers       AutoApproverPolicy `json:"autoApprovers"`
+	SSHs                []SSH              `json:"ssh,omitempty"`
+	RandomizeClientPort bool               `json:"randomizeClientPort,omitempty"`
+}
+
+// NodeAttrGrant attaches node capabilities to every node selected by Targets.
+// IPPool is parsed for policy compatibility but rejected until the allocator
+// supports it.
+type NodeAttrGrant struct {
+	Targets Aliases                  `json:"target"`
+	Attrs   []tailcfg.NodeCapability `json:"attr,omitempty"`
+	IPPool  []netip.Prefix           `json:"ipPool,omitempty"`
 }
 
 // MarshalJSON is deliberately not implemented for Policy.
@@ -1597,8 +1624,15 @@ var (
 	autogroupForSSHSrc    = []AutoGroup{AutoGroupMember, AutoGroupTagged}
 	autogroupForSSHDst    = []AutoGroup{AutoGroupMember, AutoGroupTagged, AutoGroupSelf}
 	autogroupForSSHUser   = []AutoGroup{AutoGroupNonRoot}
+	autogroupForNodeAttrs = []AutoGroup{AutoGroupMember, AutoGroupTagged}
 	autogroupNotSupported = []AutoGroup{}
 )
+
+// Tailscale reserves these CGNAT subranges for MagicDNS/TSMP and Quad100/IPN.
+var reservedTSRanges = []netip.Prefix{
+	netip.MustParsePrefix("100.100.100.0/24"),
+	netip.MustParsePrefix("100.115.92.0/23"),
+}
 
 func validateAutogroupSupported(ag *AutoGroup) error {
 	if ag == nil {
@@ -1639,6 +1673,35 @@ func validateAutogroupForDst(dst *AutoGroup) error {
 
 	if !slices.Contains(autogroupForDst, *dst) {
 		return fmt.Errorf("autogroup %q is not supported for ACL destinations, can be %v", *dst, autogroupForDst)
+	}
+
+	return nil
+}
+
+func validateAutogroupForNodeAttrs(ag *AutoGroup) error {
+	if ag == nil {
+		return nil
+	}
+
+	if !slices.Contains(autogroupForNodeAttrs, *ag) {
+		return fmt.Errorf("%w: %q, can be %v", ErrNodeAttrsAutogroupNotAllowed, *ag, autogroupForNodeAttrs)
+	}
+
+	return nil
+}
+
+func validateNodeAttrIPPool(prefix netip.Prefix) error {
+	cgnat := tsaddr.CGNATRange()
+	masked := prefix.Masked()
+
+	if masked.Bits() < cgnat.Bits() || !cgnat.Contains(masked.Addr()) {
+		return fmt.Errorf("%w: %q", ErrNodeAttrsIPPoolOutOfRange, prefix)
+	}
+
+	for _, reserved := range reservedTSRanges {
+		if masked.Overlaps(reserved) {
+			return fmt.Errorf("%w: %q overlaps %q", ErrNodeAttrsIPPoolReserved, prefix, reserved)
+		}
 	}
 
 	return nil
@@ -1827,6 +1890,53 @@ func (p *Policy) validate() error {
 				if err := p.TagOwners.Contains(tagOwner); err != nil {
 					errs = append(errs, err)
 				}
+			}
+		}
+	}
+
+	for _, nodeAttr := range p.NodeAttrs {
+		for _, target := range nodeAttr.Targets {
+			switch target := target.(type) {
+			case *Host:
+				if !p.Hosts.exist(*target) {
+					errs = append(errs, fmt.Errorf(`Host %q is not defined in the Policy, please define or remove the reference to it`, *target))
+				}
+			case *AutoGroup:
+				if err := validateAutogroupSupported(target); err != nil {
+					errs = append(errs, err)
+					continue
+				}
+				if err := validateAutogroupForNodeAttrs(target); err != nil {
+					errs = append(errs, err)
+				}
+			case *Group:
+				if err := p.Groups.Contains(target); err != nil {
+					errs = append(errs, err)
+				}
+			case *Tag:
+				if err := p.TagOwners.Contains(target); err != nil {
+					errs = append(errs, err)
+				}
+			case *Username, *Prefix, Asterix:
+				// These aliases are resolved when nodeAttrs are compiled.
+			default:
+				errs = append(errs, fmt.Errorf("%w: %q (%T)", ErrNodeAttrTargetUnsupported, target, target))
+			}
+		}
+
+		for _, attr := range nodeAttr.Attrs {
+			if issue, ok := nodeAttrUnsupportedCaps[attr]; ok {
+				errs = append(errs, fmt.Errorf("%w: %q tracked in %s", ErrNodeAttrUnsupported, attr, issue))
+			}
+		}
+
+		if len(nodeAttr.IPPool) > 0 {
+			errs = append(errs, ErrNodeAttrIPPoolUnsupported)
+		}
+
+		for _, prefix := range nodeAttr.IPPool {
+			if err := validateNodeAttrIPPool(prefix); err != nil {
+				errs = append(errs, err)
 			}
 		}
 	}

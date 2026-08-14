@@ -46,6 +46,14 @@ type PolicyManager struct {
 	// Lazy map of per-node filter rules (reduced, for packet filters)
 	filterRulesMap    *xsync.Map[types.NodeID, []tailcfg.FilterRule]
 	usesAutogroupSelf bool
+
+	// nodeAttrsMap is the per-node CapMap compiled from policy.NodeAttrs.
+	// nodeAttrsHashes shadow it for change detection between updateLocked
+	// runs. nodeAttrsChanged accumulates all per-call diffs since the last
+	// drain so an intervening SetUsers or SetNodes cannot lose a change.
+	nodeAttrsMap     map[types.NodeID]tailcfg.NodeCapMap
+	nodeAttrsHashes  map[types.NodeID]deephash.Sum
+	nodeAttrsChanged []types.NodeID
 }
 
 // filterAndPolicy combines the compiled filter rules with policy content for hashing.
@@ -172,6 +180,14 @@ func (pm *PolicyManager) updateLocked() (bool, error) {
 	pm.exitSet = exitSet
 	pm.exitSetHash = exitSetHash
 
+	// Recompile per-node nodeAttrs and append the diff to the pending
+	// change buffer. Delivery through MapResponse is added by the next
+	// upstream patch in the series.
+	err = pm.refreshNodeAttrsLocked()
+	if err != nil {
+		return false, err
+	}
+
 	// Determine if we need to send updates to nodes
 	// filterChanged now includes policy content changes (via combined hash),
 	// so it will detect changes even for autogroup:self where compiled filter is empty
@@ -245,6 +261,7 @@ func (pm *PolicyManager) SetPolicy(polB []byte) (bool, error) {
 		Int("groups.count", len(pol.Groups)).
 		Int("hosts.count", len(pol.Hosts)).
 		Int("tagOwners.count", len(pol.TagOwners)).
+		Int("nodeAttrs.count", len(pol.NodeAttrs)).
 		Int("autoApprovers.routes.count", len(pol.AutoApprovers.Routes)).
 		Msg("Policy parsed successfully")
 
