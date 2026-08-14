@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/juanfont/headscale/hscontrol/types"
-	"github.com/juanfont/headscale/hscontrol/util"
 	"github.com/rs/zerolog/log"
 	"gorm.io/gorm"
 	"tailscale.com/tailcfg"
@@ -318,12 +317,10 @@ func (h *Headscale) reqToNewRegisterResponse(
 		return nil, NewHTTPError(http.StatusInternalServerError, "failed to generate registration ID", err)
 	}
 
-	// Ensure we have a valid hostname
-	hostname := util.EnsureHostname(
-		req.Hostinfo,
-		machineKey.String(),
-		req.NodeKey.String(),
-	)
+	var hostname string
+	if req.Hostinfo != nil {
+		hostname = req.Hostinfo.Hostname
+	}
 
 	// Ensure we have valid hostinfo
 	hostinfo := cmp.Or(req.Hostinfo, &tailcfg.Hostinfo{})
@@ -432,12 +429,10 @@ func (h *Headscale) handleRegisterInteractive(
 		return nil, fmt.Errorf("generating registration ID: %w", err)
 	}
 
-	// Ensure we have a valid hostname
-	hostname := util.EnsureHostname(
-		req.Hostinfo,
-		machineKey.String(),
-		req.NodeKey.String(),
-	)
+	var hostname string
+	if req.Hostinfo != nil {
+		hostname = req.Hostinfo.Hostname
+	}
 
 	// Ensure we have valid hostinfo
 	hostinfo := cmp.Or(req.Hostinfo, &tailcfg.Hostinfo{})

@@ -763,8 +763,8 @@ func TestAuthenticationFlows(t *testing.T) {
 		// TEST: Empty hostname is handled with defensive code
 		// WHAT: Tests that empty hostname in hostinfo generates a default hostname
 		// INPUT: Register request with hostinfo containing empty hostname string
-		// EXPECTED: Node registers successfully with generated hostname (node-MACHINEKEY)
-		// WHY: Defensive code prevents errors from missing hostnames; generates sensible default
+		// EXPECTED: Node registers successfully with an empty raw hostname and "node" GivenName
+		// WHY: The DNS label has a deterministic fallback while preserving client input
 		{
 			name: "empty_hostname",
 			setupFunc: func(t *testing.T, app *Headscale) (string, error) {
@@ -792,17 +792,18 @@ func TestAuthenticationFlows(t *testing.T) {
 			validate: func(t *testing.T, resp *tailcfg.RegisterResponse, app *Headscale) {
 				assert.True(t, resp.MachineAuthorized)
 
-				// Node should be created with generated hostname
+				// Raw hostname is preserved and GivenName uses the fallback label.
 				node, found := app.state.GetNodeByNodeKey(nodeKey1.Public())
 				assert.True(t, found)
-				assert.NotEmpty(t, node.Hostname())
+				assert.Empty(t, node.Hostname())
+				assert.Equal(t, "node", node.GivenName())
 			},
 		},
 		// TEST: Nil hostinfo is handled with defensive code
 		// WHAT: Tests that nil hostinfo in register request is handled gracefully
 		// INPUT: Register request with Hostinfo field set to nil
-		// EXPECTED: Node registers successfully with generated hostname starting with "node-"
-		// WHY: Defensive code prevents nil pointer panics; creates valid default hostinfo
+		// EXPECTED: Node registers successfully with an empty raw hostname and "node" GivenName
+		// WHY: Defensive code prevents nil pointer panics while preserving client input
 		{
 			name: "nil_hostinfo",
 			setupFunc: func(t *testing.T, app *Headscale) (string, error) {
@@ -828,12 +829,11 @@ func TestAuthenticationFlows(t *testing.T) {
 			validate: func(t *testing.T, resp *tailcfg.RegisterResponse, app *Headscale) {
 				assert.True(t, resp.MachineAuthorized)
 
-				// Node should be created with generated hostname from defensive code
+				// Raw hostname stays empty and GivenName uses the fallback label.
 				node, found := app.state.GetNodeByNodeKey(nodeKey1.Public())
 				assert.True(t, found)
-				assert.NotEmpty(t, node.Hostname())
-				// Hostname should start with "node-" (generated from machine key)
-				assert.True(t, strings.HasPrefix(node.Hostname(), "node-"))
+				assert.Empty(t, node.Hostname())
+				assert.Equal(t, "node", node.GivenName())
 			},
 		},
 
@@ -2119,9 +2119,8 @@ func TestAuthenticationFlows(t *testing.T) {
 				node, found := app.state.GetNodeByNodeKey(nodeKey1.Public())
 				assert.True(t, found, "node should be registered despite nil hostinfo")
 				if found {
-					// Should have some default hostname or handle nil gracefully
-					hostname := node.Hostname()
-					assert.NotEmpty(t, hostname, "should have some hostname even with nil hostinfo")
+					assert.Empty(t, node.Hostname())
+					assert.Equal(t, "node", node.GivenName())
 				}
 			},
 		},

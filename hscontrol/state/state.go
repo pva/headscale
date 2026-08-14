@@ -12,6 +12,8 @@ import (
 	"net/netip"
 	"os"
 	"slices"
+	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -32,6 +34,7 @@ import (
 	"tailscale.com/types/key"
 	"tailscale.com/types/ptr"
 	"tailscale.com/types/views"
+	"tailscale.com/util/dnsname"
 )
 
 const (
@@ -715,33 +718,27 @@ func (s *State) SetApprovedRoutes(nodeID types.NodeID, routes []netip.Prefix) (t
 	return nodeView, c, nil
 }
 
-// RenameNode changes the display name of a node.
+// RenameNode changes the display name of a node. The admin supplies
+// the exact DNS label they want; malformed input is rejected and
+// collisions error out rather than silently bumping the label.
 func (s *State) RenameNode(nodeID types.NodeID, newName string) (types.NodeView, change.ChangeSet, error) {
-	if err := util.ValidateHostname(newName); err != nil {
+	if err := dnsname.ValidLabel(newName); err != nil {
 		return types.NodeView{}, change.EmptySet, fmt.Errorf("renaming node: %w", err)
 	}
 
-	// Check name uniqueness against NodeStore
-	allNodes := s.nodeStore.ListNodes()
-	for i := 0; i < allNodes.Len(); i++ {
-		node := allNodes.At(i)
-		if node.ID() != nodeID && node.AsStruct().GivenName == newName {
+	view, err := s.nodeStore.SetGivenName(nodeID, newName)
+	if err != nil {
+		switch {
+		case errors.Is(err, ErrGivenNameTaken):
 			return types.NodeView{}, change.EmptySet, fmt.Errorf("name is not unique: %s", newName)
+		case errors.Is(err, ErrNodeNotFound):
+			return types.NodeView{}, change.EmptySet, fmt.Errorf("node not found in NodeStore: %d", nodeID)
+		default:
+			return types.NodeView{}, change.EmptySet, fmt.Errorf("renaming node: %w", err)
 		}
 	}
 
-	// Update NodeStore before database to ensure consistency. The NodeStore update is
-	// blocking and will be the source of truth for the batcher. The database update must
-	// make the exact same change.
-	n, ok := s.nodeStore.UpdateNode(nodeID, func(node *types.Node) {
-		node.GivenName = newName
-	})
-
-	if !ok {
-		return types.NodeView{}, change.EmptySet, fmt.Errorf("node not found in NodeStore: %d", nodeID)
-	}
-
-	return s.persistNodeToDB(n)
+	return s.persistNodeToDB(view)
 }
 
 // AssignNodeToUser transfers a node to a different user.
@@ -1134,13 +1131,11 @@ func (s *State) createAndSaveNewNode(params newNodeParams) (types.NodeView, erro
 	nodeToRegister.IPv4 = ipv4
 	nodeToRegister.IPv6 = ipv6
 
-	// Ensure unique given name if not set
+	// Seed GivenName from the sanitised raw hostname. NodeStore.PutNode
+	// bumps on collision and falls back to "node" if sanitisation yields
+	// an empty label.
 	if nodeToRegister.GivenName == "" {
-		givenName, err := hsdb.EnsureUniqueGivenName(s.db.DB, nodeToRegister.Hostname)
-		if err != nil {
-			return types.NodeView{}, fmt.Errorf("failed to ensure unique given name: %w", err)
-		}
-		nodeToRegister.GivenName = givenName
+		nodeToRegister.GivenName = dnsname.SanitizeHostname(nodeToRegister.Hostname)
 	}
 
 	// New node - database first to get ID, then NodeStore
@@ -1185,12 +1180,9 @@ func (s *State) HandleNodeFromAuthPath(
 		return types.NodeView{}, change.EmptySet, fmt.Errorf("failed to find user: %w", err)
 	}
 
-	// Ensure we have a valid hostname from the registration cache entry
-	hostname := util.EnsureHostname(
-		regEntry.Node.Hostinfo,
-		regEntry.Node.MachineKey.String(),
-		regEntry.Node.NodeKey.String(),
-	)
+	// Preserve the raw hostname reported by the client. GivenName is
+	// sanitised separately when a new node is created.
+	hostname := regEntry.Node.Hostname
 
 	// Ensure we have valid hostinfo
 	validHostinfo := cmp.Or(regEntry.Node.Hostinfo, &tailcfg.Hostinfo{})
@@ -1413,12 +1405,12 @@ func (s *State) HandleNodeFromPreAuthKey(
 		}
 	}
 
-	// Ensure we have a valid hostname - handle nil/empty cases
-	hostname := util.EnsureHostname(
-		regReq.Hostinfo,
-		machineKey.String(),
-		regReq.NodeKey.String(),
-	)
+	// Preserve the raw hostname reported by the client. GivenName is
+	// sanitised separately when a new node is created.
+	var hostname string
+	if regReq.Hostinfo != nil {
+		hostname = regReq.Hostinfo.Hostname
+	}
 
 	// Ensure we have valid hostinfo
 	validHostinfo := cmp.Or(regReq.Hostinfo, &tailcfg.Hostinfo{})
@@ -1685,6 +1677,27 @@ func (s *State) autoApproveNodes() ([]change.ChangeSet, error) {
 	return cs, nil
 }
 
+// isAutoDerivedGivenName reports whether given matches what
+// dnsname.SanitizeHostname(hostname) would produce, optionally with a
+// NodeStore collision-bump "-N" suffix. It is used to detect whether a
+// GivenName has been admin-renamed (in which case it must not be
+// overwritten by client-side hostname changes).
+func isAutoDerivedGivenName(given, hostname string) bool {
+	base := dnsname.SanitizeHostname(hostname)
+	if given == base {
+		return true
+	}
+
+	suffix, ok := strings.CutPrefix(given, base+"-")
+	if !ok {
+		return false
+	}
+
+	_, err := strconv.Atoi(suffix)
+
+	return err == nil
+}
+
 // UpdateNodeFromMapRequest processes a MapRequest and updates the node.
 // TODO(kradalby): This is essentially a patch update that could be sent directly to nodes,
 // which means we could shortcut the whole change thing if there are no other important updates.
@@ -1778,7 +1791,18 @@ func (s *State) UpdateNodeFromMapRequest(id types.NodeID, req tailcfg.MapRequest
 			// before we take the changes.
 			// NetInfo preservation has already been handled above before early return check
 			currentNode.Hostinfo = req.Hostinfo
-			currentNode.ApplyHostnameFromHostInfo(req.Hostinfo)
+			if req.Hostinfo != nil && req.Hostinfo.Hostname != "" {
+				// Preserve an admin-renamed GivenName: only auto-derive when the
+				// current GivenName still matches the sanitised old Hostname,
+				// possibly with a numeric collision suffix.
+				autoDerived := isAutoDerivedGivenName(currentNode.GivenName, currentNode.Hostname)
+
+				currentNode.Hostname = req.Hostinfo.Hostname
+				if autoDerived {
+					currentNode.GivenName = dnsname.SanitizeHostname(req.Hostinfo.Hostname)
+					// NodeStore.UpdateNode auto-bumps GivenName on collision.
+				}
+			}
 
 			if routeChange {
 				// Apply pre-calculated route approval

@@ -73,6 +73,26 @@ func TestNetInfoFromMapRequest(t *testing.T) {
 	}
 }
 
+func TestIsAutoDerivedGivenName(t *testing.T) {
+	tests := []struct {
+		name      string
+		given     string
+		hostname  string
+		automatic bool
+	}{
+		{name: "sanitised hostname", given: "joes-mac", hostname: "Joe's Mac", automatic: true},
+		{name: "collision suffix", given: "joes-mac-2", hostname: "Joe's Mac", automatic: true},
+		{name: "admin rename", given: "work-laptop", hostname: "Joe's Mac", automatic: false},
+		{name: "non-numeric suffix", given: "joes-mac-old", hostname: "Joe's Mac", automatic: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.automatic, isAutoDerivedGivenName(tt.given, tt.hostname))
+		})
+	}
+}
+
 func TestNetInfoPreservationInRegistrationFlow(t *testing.T) {
 	nodeID := types.NodeID(1)
 

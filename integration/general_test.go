@@ -12,7 +12,6 @@ import (
 
 	v1 "github.com/juanfont/headscale/gen/go/headscale/v1"
 	"github.com/juanfont/headscale/hscontrol/types"
-	"github.com/juanfont/headscale/hscontrol/util"
 	"github.com/juanfont/headscale/integration/hsic"
 	"github.com/juanfont/headscale/integration/tsic"
 	"github.com/rs/zerolog/log"
@@ -22,6 +21,7 @@ import (
 	"golang.org/x/sync/errgroup"
 	"tailscale.com/client/tailscale/apitype"
 	"tailscale.com/types/key"
+	"tailscale.com/util/dnsname"
 )
 
 func TestPingAllByIP(t *testing.T) {
@@ -512,10 +512,12 @@ func TestTaildrop(t *testing.T) {
 func TestUpdateHostnameFromClient(t *testing.T) {
 	IntegrationSkip(t)
 
+	// Exercise the SaaS sanitisation rules end-to-end with hostnames
+	// containing spaces, punctuation and dots.
 	hostnames := map[string]string{
-		"1": "user1-host",
-		"2": "user2-host",
-		"3": "user3-host",
+		"1": "Joe's Mac mini",
+		"2": "Test@Host",
+		"3": "mail.server",
 	}
 
 	spec := ScenarioSpec{
@@ -577,10 +579,8 @@ func TestUpdateHostnameFromClient(t *testing.T) {
 			hostname := hostnames[strconv.FormatUint(node.GetId(), 10)]
 			assert.Equal(ct, hostname, node.GetName(), "Node name should match hostname")
 
-			// GivenName is normalized (lowercase, invalid chars stripped)
-			normalised, err := util.NormaliseHostname(hostname)
-			assert.NoError(ct, err)
-			assert.Equal(ct, normalised, node.GetGivenName(), "Given name should match FQDN rules")
+			assert.Equal(ct, dnsname.SanitizeHostname(hostname), node.GetGivenName(),
+				"Given name should match SaaS hostname-sanitisation rules")
 		}
 	}, 20*time.Second, 1*time.Second)
 
@@ -677,8 +677,7 @@ func TestUpdateHostnameFromClient(t *testing.T) {
 		for _, node := range nodes {
 			hostname := hostnames[strconv.FormatUint(node.GetId(), 10)]
 			givenName := fmt.Sprintf("%d-givenname", node.GetId())
-			// Hostnames are lowercased before being stored, so "NEW" becomes "new"
-			if node.GetName() != hostname+"new" || node.GetGivenName() != givenName {
+			if node.GetName() != hostname+"NEW" || node.GetGivenName() != givenName {
 				return false
 			}
 		}
