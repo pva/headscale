@@ -10,9 +10,11 @@ import (
 	"testing"
 
 	"github.com/gorilla/mux"
+	"github.com/juanfont/headscale/hscontrol/capver"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"tailscale.com/tailcfg"
+	"tailscale.com/types/key"
 )
 
 // newNoiseRouterWithBodyLimit builds a Gorilla router with the same body-limit
@@ -137,6 +139,71 @@ func TestNoiseBodyLimit_AtExactLimit(t *testing.T) {
 	require.NoError(t, readErr)
 	assert.Equal(t, http.StatusOK, rec.Code)
 	assert.Len(t, body, int(noiseBodyLimit))
+}
+
+func TestEarlyNoiseDefersUnsupportedClientRejection(t *testing.T) {
+	t.Parallel()
+
+	ns := &noiseServer{challenge: key.NewChallenge()}
+
+	tests := []struct {
+		name        string
+		version     int
+		wantPayload bool
+	}{
+		{
+			name:        "before EarlyNoise support",
+			version:     earlyNoiseCapabilityVersion - 1,
+			wantPayload: false,
+		},
+		{
+			name:        "unsupported by Headscale but supports EarlyNoise",
+			version:     63,
+			wantPayload: true,
+		},
+		{
+			name:        "supported by Headscale",
+			version:     int(capver.MinSupportedCapabilityVersion),
+			wantPayload: true,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			var payload bytes.Buffer
+			err := ns.earlyNoise(test.version, &payload)
+			require.NoError(t, err)
+
+			if test.wantPayload {
+				assert.NotEmpty(t, payload.Bytes())
+				assert.True(t, bytes.HasPrefix(payload.Bytes(), []byte(earlyPayloadMagic)))
+			} else {
+				assert.Empty(t, payload.Bytes())
+			}
+		})
+	}
+}
+
+func TestNoiseClientIdentity(t *testing.T) {
+	app := createTestApp(t)
+	user := app.state.CreateUserForTest("diagnostic-user")
+	node := app.state.CreateNodeForTest(user, "old-client")
+	node.User = *user
+
+	_, _, err := app.state.SaveNode(node.View())
+	require.NoError(t, err)
+
+	identity, ok := app.noiseClientIdentity(node.MachineKey)
+	require.True(t, ok)
+	assert.Equal(t, node.ID, identity.nodeID)
+	assert.Equal(t, "old-client", identity.hostname)
+	assert.Equal(t, user.ID, identity.userID)
+	assert.Equal(t, user.Username(), identity.username)
+
+	_, ok = app.noiseClientIdentity(key.NewMachine().Public())
+	assert.False(t, ok)
 }
 
 func TestNoisePollNetMapHandler_OversizedBody(t *testing.T) {

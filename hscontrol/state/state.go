@@ -592,6 +592,13 @@ func (s *State) GetNodeByMachineKey(machineKey key.MachinePublic, userID types.U
 	return s.nodeStore.GetNodeByMachineKey(machineKey, userID)
 }
 
+// GetNodeByMachineKeyAnyUser retrieves a node by its machine key regardless of user.
+// It is intended for protocol-level diagnostics where the user identity is not
+// available yet.
+func (s *State) GetNodeByMachineKeyAnyUser(machineKey key.MachinePublic) (types.NodeView, bool) {
+	return s.nodeStore.GetNodeByMachineKeyAnyUser(machineKey)
+}
+
 // ListNodes retrieves specific nodes by ID, or all nodes if no IDs provided.
 func (s *State) ListNodes(nodeIDs ...types.NodeID) views.Slice[types.NodeView] {
 	if len(nodeIDs) == 0 {

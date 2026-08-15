@@ -96,6 +96,28 @@ func (h *Headscale) NoiseUpgradeHandler(
 	noiseServer.machineKey = noiseServer.conn.Peer()
 	noiseServer.protocolVersion = noiseServer.conn.ProtocolVersion()
 
+	// Reject unsupported clients only after AcceptHTTP has completed the Noise
+	// handshake. At this point the peer machine key is available, so a failed
+	// connection can be tied to a registered node instead of being logged as an
+	// anonymous HTTP 500 after the connection has already been hijacked.
+	if !isSupportedVersion(tailcfg.CapabilityVersion(noiseServer.protocolVersion)) {
+		h.logUnsupportedNoiseClient(
+			req,
+			tailcfg.CapabilityVersion(noiseServer.protocolVersion),
+			noiseServer.machineKey,
+		)
+
+		if err := noiseConn.Close(); err != nil {
+			log.Debug().
+				Caller().
+				Err(err).
+				Str("machine.key", noiseServer.machineKey.ShortString()).
+				Msg("failed to close unsupported Noise client connection")
+		}
+
+		return
+	}
+
 	// This router is served only over the Noise connection, and exposes only the new API.
 	//
 	// The HTTP2 server that exposes this router is created for
@@ -138,9 +160,75 @@ func unsupportedClientError(version tailcfg.CapabilityVersion) error {
 	return fmt.Errorf("unsupported client version: %s (%d)", capver.TailscaleVersion(version), version)
 }
 
+type noiseClientIdentity struct {
+	nodeID   types.NodeID
+	hostname string
+	userID   uint
+	username string
+}
+
+func (h *Headscale) noiseClientIdentity(machineKey key.MachinePublic) (noiseClientIdentity, bool) {
+	// NodeStore is populated from the database and indexed by machine key. Use
+	// it instead of issuing a database query for every unauthenticated request
+	// to this public endpoint.
+	node, ok := h.state.GetNodeByMachineKeyAnyUser(machineKey)
+	if !ok {
+		return noiseClientIdentity{}, false
+	}
+
+	user := node.User()
+
+	return noiseClientIdentity{
+		nodeID:   node.ID(),
+		hostname: node.Hostname(),
+		userID:   user.ID,
+		username: user.Username(),
+	}, true
+}
+
+func (h *Headscale) logUnsupportedNoiseClient(
+	req *http.Request,
+	version tailcfg.CapabilityVersion,
+	machineKey key.MachinePublic,
+) {
+	identity, registered := h.noiseClientIdentity(machineKey)
+
+	event := log.Error().
+		Caller().
+		Err(unsupportedClientError(version)).
+		Int("minimum_cap_ver", int(capver.MinSupportedCapabilityVersion)).
+		Int("client_cap_ver", int(version)).
+		Str("minimum_version", capver.TailscaleVersion(capver.MinSupportedCapabilityVersion)).
+		Str("client_version", capver.TailscaleVersion(version)).
+		Str("machine.key", machineKey.ShortString()).
+		Str("remote_addr", req.RemoteAddr).
+		Bool("registered", registered)
+
+	if forwardedFor := req.Header.Get("X-Forwarded-For"); forwardedFor != "" {
+		event = event.Str("x_forwarded_for", forwardedFor)
+	}
+	if realIP := req.Header.Get("X-Real-IP"); realIP != "" {
+		event = event.Str("x_real_ip", realIP)
+	}
+
+	if registered {
+		event = event.
+			Uint64("node.id", identity.nodeID.Uint64()).
+			Str("node.name", identity.hostname).
+			Uint("user.id", identity.userID).
+			Str("user.name", identity.username)
+	}
+
+	event.Msg("unsupported Noise client connected")
+}
+
 func (ns *noiseServer) earlyNoise(protocolVersion int, writer io.Writer) error {
-	if !isSupportedVersion(tailcfg.CapabilityVersion(protocolVersion)) {
-		return unsupportedClientError(tailcfg.CapabilityVersion(protocolVersion))
+	// EarlyNoise is optional and was introduced in capability version 49. Do
+	// not reject older clients here: AcceptHTTP has not returned their machine
+	// key yet. The upgrade handler performs the minimum-version check after the
+	// handshake and logs the registered node identity before closing the conn.
+	if protocolVersion < earlyNoiseCapabilityVersion {
+		return nil
 	}
 
 	earlyJSON, err := json.Marshal(&tailcfg.EarlyNoise{
