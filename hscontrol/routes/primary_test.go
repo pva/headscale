@@ -95,6 +95,42 @@ func TestPrimaryRoutes(t *testing.T) {
 			expectedChange: false,
 		},
 		{
+			name: "node-registers-unique-routes-and-one-overlapping-route",
+			operations: func(pr *PrimaryRoutes) bool {
+				pr.SetRoutes(100, mp("185.76.151.0/24"))
+
+				return pr.SetRoutes(
+					423,
+					mp("185.76.151.0/24"),
+					mp("172.16.144.0/23"),
+					mp("172.16.146.0/23"),
+					mp("10.69.1.0/24"),
+				)
+			},
+			expectedRoutes: map[types.NodeID]set.Set[netip.Prefix]{
+				100: {
+					mp("185.76.151.0/24"): {},
+				},
+				423: {
+					mp("185.76.151.0/24"): {},
+					mp("172.16.144.0/23"): {},
+					mp("172.16.146.0/23"): {},
+					mp("10.69.1.0/24"):    {},
+				},
+			},
+			expectedPrimaries: map[netip.Prefix]types.NodeID{
+				mp("185.76.151.0/24"): 100,
+				mp("172.16.144.0/23"): 423,
+				mp("172.16.146.0/23"): 423,
+				mp("10.69.1.0/24"):    423,
+			},
+			expectedIsPrimary: map[types.NodeID]bool{
+				100: true,
+				423: true,
+			},
+			expectedChange: true,
+		},
+		{
 			name: "node-deregisters-a-route",
 			operations: func(pr *PrimaryRoutes) bool {
 				pr.SetRoutes(1, mp("192.168.1.0/24"))
