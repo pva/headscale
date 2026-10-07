@@ -73,6 +73,9 @@ type State struct {
 	primaryRoutes *routes.PrimaryRoutes
 	// connectGen rejects stale disconnects from superseded poll sessions.
 	connectGen sync.Map // types.NodeID -> *atomic.Uint64
+	// sessionMu serialises Connect and Disconnect per node, so a Disconnect
+	// that passed the connectGen check cannot interleave with a newer Connect.
+	sessionMu sync.Map // types.NodeID -> *sync.Mutex
 }
 
 // NewState creates and initializes a new State instance, setting up the database,
@@ -462,6 +465,9 @@ func (s *State) DeleteNode(node types.NodeView) (change.ChangeSet, error) {
 // Connect marks a node as connected and updates its primary routes in the state.
 // The returned generation must be passed to Disconnect.
 func (s *State) Connect(id types.NodeID) ([]change.ChangeSet, uint64) {
+	unlock := s.lockSession(id)
+	defer unlock()
+
 	gen := s.nextConnectGen(id)
 	connectedAt := time.Now()
 
@@ -492,6 +498,18 @@ func (s *State) Connect(id types.NodeID) ([]change.ChangeSet, uint64) {
 	return c, gen
 }
 
+func (s *State) lockSession(id types.NodeID) func() {
+	value, _ := s.sessionMu.LoadOrStore(id, &sync.Mutex{})
+	mu, ok := value.(*sync.Mutex)
+	if !ok {
+		return func() {}
+	}
+
+	mu.Lock()
+
+	return mu.Unlock
+}
+
 func (s *State) nextConnectGen(id types.NodeID) uint64 {
 	value, _ := s.connectGen.LoadOrStore(id, &atomic.Uint64{})
 	counter, ok := value.(*atomic.Uint64)
@@ -518,6 +536,9 @@ func (s *State) connectGeneration(id types.NodeID) uint64 {
 
 // Disconnect marks a node as disconnected and updates its primary routes in the state.
 func (s *State) Disconnect(id types.NodeID, gen uint64) ([]change.ChangeSet, error) {
+	unlock := s.lockSession(id)
+	defer unlock()
+
 	if current := s.connectGeneration(id); current != gen {
 		log.Debug().
 			Uint64("node.id", id.Uint64()).

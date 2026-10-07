@@ -2,6 +2,7 @@ package state
 
 import (
 	"net/netip"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -10,6 +11,7 @@ import (
 	"github.com/juanfont/headscale/hscontrol/types/change"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gorm.io/gorm"
 	"tailscale.com/tailcfg"
 )
 
@@ -116,4 +118,90 @@ func TestStaleDisconnectPreservesUniqueAndOverlappingPrimaryRoutes(t *testing.T)
 
 	assert.ElementsMatch(t, unique, s.GetNodePrimaryRoutes(routerID))
 	assert.Equal(t, []netip.Prefix{shared}, s.GetNodePrimaryRoutes(proxyID))
+}
+
+// TestInFlightDisconnectDoesNotClearNewerSessionRoutes covers an old poll
+// session that passes the generation check in Disconnect and then stalls
+// (here: in the database write) while a new session connects. The old
+// Disconnect must not clear the routes of the new session when it resumes.
+func TestInFlightDisconnectDoesNotClearNewerSessionRoutes(t *testing.T) {
+	prefixV4 := netip.MustParsePrefix("100.64.0.0/10")
+	prefixV6 := netip.MustParsePrefix("fd7a:115c:a1e0::/48")
+
+	s, err := NewState(&types.Config{
+		Database: types.DatabaseConfig{
+			Type:   types.DatabaseSqlite,
+			Sqlite: types.SqliteConfig{Path: t.TempDir() + "/headscale_test.db"},
+		},
+		PrefixV4:     &prefixV4,
+		PrefixV6:     &prefixV6,
+		IPAllocation: types.IPAllocationStrategySequential,
+		Policy:       types.PolicyConfig{Mode: types.PolicyModeDB},
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = s.Close() })
+
+	route := netip.MustParsePrefix("185.76.151.0/24")
+	node := *s.CreateRegisteredNodeForTest(s.CreateUserForTest("user"), "proxies")
+	node.Hostinfo = &tailcfg.Hostinfo{RoutableIPs: []netip.Prefix{route}}
+	node.ApprovedRoutes = []netip.Prefix{route}
+	s.nodeStore.PutNode(node)
+
+	var blockDB atomic.Bool
+	dbEntered := make(chan struct{})
+	dbRelease := make(chan struct{})
+	require.NoError(t, s.db.DB.Callback().Update().Before("gorm:update").
+		Register("test:block_update", func(*gorm.DB) {
+			if blockDB.CompareAndSwap(true, false) {
+				close(dbEntered)
+				<-dbRelease
+			}
+		}))
+
+	_, oldGen := s.Connect(node.ID)
+	require.Equal(t, []netip.Prefix{route}, s.GetNodePrimaryRoutes(node.ID))
+
+	blockDB.Store(true)
+	disconnectDone := make(chan struct{})
+	go func() {
+		defer close(disconnectDone)
+		_, err := s.Disconnect(node.ID, oldGen)
+		assert.NoError(t, err)
+	}()
+
+	select {
+	case <-dbEntered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("old Disconnect did not reach the database write")
+	}
+
+	connectDone := make(chan struct{})
+	go func() {
+		defer close(connectDone)
+		_, _ = s.Connect(node.ID)
+	}()
+
+	// Give the new Connect a chance to run to completion before the old
+	// Disconnect resumes. With Connect and Disconnect serialised it cannot
+	// finish here and the wait times out.
+	select {
+	case <-connectDone:
+	case <-time.After(2 * batchTimeout):
+	}
+
+	close(dbRelease)
+
+	for _, done := range []chan struct{}{disconnectDone, connectDone} {
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Fatal("Connect/Disconnect did not finish")
+		}
+	}
+
+	nv, ok := s.GetNodeByID(node.ID)
+	require.True(t, ok)
+	require.True(t, nv.IsOnline().Valid())
+	assert.True(t, nv.IsOnline().Get())
+	assert.Equal(t, []netip.Prefix{route}, s.GetNodePrimaryRoutes(node.ID))
 }
